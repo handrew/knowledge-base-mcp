@@ -169,17 +169,6 @@ class TestMCPTools:
         assert result["added"] == 2
         assert len(result["ids"]) == 2
 
-    def test_list_backends(self, mcp_tools):
-        """Test list_backends tool."""
-        result = mcp_tools.list_backends()
-        assert "backends" in result
-        assert "current_backend" in result
-        assert result["current_backend"] == "sqlite"
-
-        # Should have at least SQLite
-        backend_names = [b["name"] for b in result["backends"]]
-        assert "sqlite" in backend_names
-
     def test_update_document(self, mcp_tools):
         """Test update_document tool."""
         # Add a document first
@@ -457,6 +446,58 @@ class TestMCPUpdateMetadataMerge:
         assert meta["a"] == 1  # Preserved
         assert meta["b"] == 3  # Updated
         assert meta["c"] == 4  # Added
+
+
+class TestSearchFeatures:
+    """Test new search features: min_score and content_preview_length."""
+
+    def test_search_min_score(self, mcp_tools):
+        """Test search with min_score filter."""
+        mcp_tools.add_document("Python programming language", "test")
+        mcp_tools.add_document("Unrelated content about cooking", "test")
+
+        # Search with high min_score - should filter out low-relevance results
+        results = mcp_tools.search("python programming", min_score=0.5)
+        # All results should have score >= 0.5
+        for r in results:
+            assert r["score"] >= 0.5
+
+    def test_search_content_preview_length(self, mcp_tools):
+        """Test search with content_preview_length truncation."""
+        long_content = "Python " * 100  # ~700 chars
+        mcp_tools.add_document(long_content, "test")
+
+        # Search with truncation
+        results = mcp_tools.search("python", content_preview_length=50)
+        assert len(results) >= 1
+        # Content should be truncated
+        assert len(results[0]["content"]) <= 53  # 50 + "..."
+
+
+class TestExpiresIn:
+    """Test expires_in duration parameter."""
+
+    def test_add_document_expires_in_seconds(self, mcp_tools):
+        """Test expires_in with integer seconds."""
+        result = mcp_tools.add_document("Temp content", "test", expires_in=3600)
+        assert "expires_at" in result
+        # Should be roughly 1 hour from now
+        from datetime import datetime
+        expires = datetime.fromisoformat(result["expires_at"])
+        now = datetime.now()
+        diff = (expires - now).total_seconds()
+        assert 3500 < diff < 3700  # Within ~100 seconds of 1 hour
+
+    def test_add_document_expires_in_string(self, mcp_tools):
+        """Test expires_in with duration string."""
+        result = mcp_tools.add_document("Temp content", "test", expires_in="1h")
+        assert "expires_at" in result
+
+        result = mcp_tools.add_document("Temp content 2", "test", expires_in="30m")
+        assert "expires_at" in result
+
+        result = mcp_tools.add_document("Temp content 3", "test", expires_in="7d")
+        assert "expires_at" in result
 
 
 class TestMigration:

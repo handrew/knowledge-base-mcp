@@ -1,23 +1,30 @@
 # MCP Tools Reference
 
-The knowledge base exposes 16 tools via MCP (Model Context Protocol).
+The knowledge base exposes 13 tools via MCP (Model Context Protocol).
 
 ## Search
 
 | Tool | Description |
 |------|-------------|
-| `search(query, mode, limit, metadata_filter)` | Search with mode: "semantic", "keyword", or "hybrid". Filter by metadata. |
+| `search(query, mode, limit, metadata_filter, min_score, content_preview_length)` | Search with mode: "semantic", "keyword", or "hybrid". Filter by metadata, score threshold, and truncate content. |
+
+**New parameters:**
+- `min_score`: Filter out results below this relevance threshold (0.0-1.0)
+- `content_preview_length`: Truncate content to N characters (useful for large docs)
 
 ## Document CRUD
 
 | Tool | Description |
 |------|-------------|
-| `add_document(content, source, metadata, expires_at, check_duplicate)` | Add a document with optional metadata and expiration |
+| `add_document(content, source, metadata, expires_at, expires_in, check_duplicate)` | Add a document with optional metadata and expiration |
 | `add_documents(documents, check_duplicate)` | Batch add with efficient batch embedding |
 | `get_document(doc_id)` | Retrieve a document by ID |
 | `update_document(doc_id, content, source, metadata, expires_at, metadata_merge)` | Update document, optionally merge metadata |
 | `append_to_document(doc_id, content, separator)` | Append content to an existing document |
 | `delete_document(doc_id)` | Remove a document by ID |
+
+**New parameter:**
+- `expires_in`: TTL as seconds (int) or duration string ("1h", "30m", "7d") - easier than ISO timestamps
 
 ## Bulk Operations
 
@@ -33,22 +40,32 @@ The knowledge base exposes 16 tools via MCP (Model Context Protocol).
 | `list_documents(source, metadata_filter, limit, offset)` | List/filter documents with pagination |
 | `find_duplicate(content)` | Check if content already exists |
 | `cleanup_expired()` | Manually trigger expiration cleanup |
-| `ingest_file(file_path, chunk_size, overlap)` | Ingest a text file, splitting into chunks |
 
 ## System
 
 | Tool | Description |
 |------|-------------|
 | `stats()` | Get KB statistics (doc count, backend type, current model) |
-| `reembed(target_model)` | Re-embed all documents with a different model |
-| `list_backends()` | List available backends and current backend |
+
+**Not exposed as MCP tools** (use Python API directly):
+- `reembed()` - Rare admin operation for switching embedding models
+- `ingest_file()` - File ingestion with chunking (agents can do this themselves)
+- `list_backends()` - One-time setup operation
 
 ## Examples
 
 ```python
-# Search with metadata filter
-search("how to configure webpack", mode="hybrid", limit=5)
-search("python", metadata_filter={"topic": "programming"})  # Filter by metadata
+# Search with quality filter and preview
+search("how to configure webpack", mode="hybrid", limit=5, min_score=0.5)
+search("python", metadata_filter={"topic": "programming"}, content_preview_length=200)
+
+# Add document with TTL (easier than ISO timestamps)
+add_document(
+    "Session context for current task...",
+    source="session",
+    metadata={"session_id": "abc123"},
+    expires_in="1h"  # or expires_in=3600 for seconds
+)
 
 # Add documents with metadata and expiration
 add_document(
@@ -94,18 +111,9 @@ list_documents(source="meetings", metadata_filter={"project": "alpha"}, limit=10
 # Check for duplicates before adding
 find_duplicate("Some content to check")
 
-# Ingest a file
-ingest_file("/path/to/document.txt", chunk_size=1000, overlap=200)
-
 # Check what's in the KB
 stats()
 
 # Manually clean up expired documents
 cleanup_expired()
-
-# Switch embedding models
-reembed("BAAI/bge-base-en-v1.5")
-
-# List available backends
-list_backends()
 ```

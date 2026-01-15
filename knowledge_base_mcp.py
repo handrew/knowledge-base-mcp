@@ -53,7 +53,9 @@ def search(
     query: str,
     mode: str = "hybrid",
     limit: int = 5,
-    metadata_filter: dict = None
+    metadata_filter: dict = None,
+    min_score: float = None,
+    content_preview_length: int = None
 ) -> list[dict]:
     """
     Search the knowledge base.
@@ -65,16 +67,61 @@ def search(
         metadata_filter: Filter results by metadata key-value pairs (optional).
                          Only documents matching ALL key-value pairs are returned.
                          Example: {"project": "foo", "private": false}
+        min_score: Minimum relevance score threshold (0.0-1.0). Results below this are excluded.
+        content_preview_length: If set, truncate content to this many characters (useful for large docs)
 
     Returns:
         List of matching documents with id, content, source, and relevance score
     """
     if mode == "semantic":
-        return kb.search_semantic(query, limit, metadata_filter)
+        results = kb.search_semantic(query, limit, metadata_filter)
     elif mode == "keyword":
-        return kb.search_keyword(query, limit, metadata_filter)
+        results = kb.search_keyword(query, limit, metadata_filter)
     else:
-        return kb.search_hybrid(query, limit, metadata_filter=metadata_filter)
+        results = kb.search_hybrid(query, limit, metadata_filter=metadata_filter)
+
+    # Apply min_score filter
+    if min_score is not None:
+        results = [r for r in results if r["score"] >= min_score]
+
+    # Truncate content if requested
+    if content_preview_length is not None:
+        for r in results:
+            if len(r["content"]) > content_preview_length:
+                r["content"] = r["content"][:content_preview_length] + "..."
+
+    return results
+
+
+def _parse_expires_in(expires_in: str | int) -> str:
+    """Convert expires_in to ISO timestamp.
+
+    Args:
+        expires_in: Duration as seconds (int) or string like "1h", "30m", "7d"
+
+    Returns:
+        ISO format timestamp
+    """
+    from datetime import datetime, timedelta
+
+    if isinstance(expires_in, int):
+        seconds = expires_in
+    else:
+        # Parse duration string
+        s = expires_in.strip().lower()
+        if s.endswith("s"):
+            seconds = int(s[:-1])
+        elif s.endswith("m"):
+            seconds = int(s[:-1]) * 60
+        elif s.endswith("h"):
+            seconds = int(s[:-1]) * 3600
+        elif s.endswith("d"):
+            seconds = int(s[:-1]) * 86400
+        else:
+            seconds = int(s)  # Assume seconds if no suffix
+
+    expires = datetime.now() + timedelta(seconds=seconds)
+    return expires.isoformat()
 
 
 @mcp.tool()
@@ -83,6 +130,7 @@ def add_document(
     source: str = "manual",
     metadata: dict = None,
     expires_at: str = None,
+    expires_in: str | int = None,
     check_duplicate: bool = False
 ) -> dict:
     """
@@ -93,17 +141,24 @@ def add_document(
         source: Optional source identifier (e.g., filename, URL, topic)
         metadata: Optional key-value metadata (e.g., {"project": "foo", "private": true})
         expires_at: Optional expiration timestamp (ISO format, e.g., "2024-12-31T23:59:59")
+        expires_in: Optional TTL as seconds (int) or duration string ("1h", "30m", "7d").
+                    Ignored if expires_at is set.
         check_duplicate: If True, return existing doc ID if content already exists
 
     Returns:
         The created document with its ID, or existing ID if duplicate found
     """
-    doc_id = kb.add(content, source, metadata, expires_at, check_duplicate)
+    # Convert expires_in to expires_at if needed
+    effective_expires_at = expires_at
+    if effective_expires_at is None and expires_in is not None:
+        effective_expires_at = _parse_expires_in(expires_in)
+
+    doc_id = kb.add(content, source, metadata, effective_expires_at, check_duplicate)
     result = {"id": doc_id, "content": content, "source": source, "status": "added"}
     if metadata:
         result["metadata"] = metadata
-    if expires_at:
-        result["expires_at"] = expires_at
+    if effective_expires_at:
+        result["expires_at"] = effective_expires_at
     return result
 
 
@@ -299,25 +354,10 @@ def stats() -> dict:
     }
 
 
-@mcp.tool()
-def reembed(target_model: str = None) -> dict:
-    """
-    Re-embed all documents with a different model.
-
-    Use this when switching embedding models to ensure all documents
-    use consistent embeddings for accurate similarity search.
-
-    Args:
-        target_model: Model to use (e.g., "BAAI/bge-m3", "BAAI/bge-base-en-v1.5").
-                      If not specified, uses current model.
-
-    Returns:
-        Stats about re-embedding (count, model, whether VSS was rebuilt)
-    """
-    return kb.reembed(target_model)
+# Note: reembed is available via Python API (kb.reembed) but not exposed as MCP tool
+# since it's a rare admin operation that's better done directly.
 
 
-@mcp.tool()
 def ingest_file(file_path: str, chunk_size: int = 1000, overlap: int = 200) -> dict:
     """
     Ingest a text file into the knowledge base, splitting into chunks.
@@ -374,18 +414,8 @@ def ingest_file(file_path: str, chunk_size: int = 1000, overlap: int = 200) -> d
     }
 
 
-@mcp.tool()
-def list_backends() -> dict:
-    """
-    List available database backends.
-
-    Returns:
-        List of backends with name, description, and availability status
-    """
-    return {
-        "backends": get_available_backends(),
-        "current_backend": kb.backend_type,
-    }
+# Note: list_backends is available via Python API (get_available_backends) but not
+# exposed as MCP tool since it's a one-time setup operation.
 
 
 @mcp.tool()

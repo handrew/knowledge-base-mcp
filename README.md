@@ -38,11 +38,11 @@ Add to `~/.claude/claude_code_config.json`:
 ## Basic Usage
 
 ```python
-# Search
-search("webpack config", mode="hybrid", limit=5)
+# Search with quality threshold and preview
+search("webpack config", mode="hybrid", limit=5, min_score=0.5, content_preview_length=200)
 
-# Add document with metadata
-add_document("Meeting notes...", source="meetings", metadata={"project": "alpha"})
+# Add document with TTL
+add_document("Session notes...", source="session", metadata={"task": "current"}, expires_in="1h")
 
 # Update with metadata merge
 update_document(doc_id=1, metadata={"reviewed": True}, metadata_merge=True)
@@ -56,7 +56,7 @@ search("python", metadata_filter={"topic": "programming"})
 
 ## Documentation
 
-- **[MCP Tools Reference](docs/mcp-tools.md)** - All 16 available tools with examples
+- **[MCP Tools Reference](docs/mcp-tools.md)** - All 13 available tools with examples
 - **[Python API](docs/python-api.md)** - Direct Python usage without MCP
 - **[Backends](docs/backends.md)** - SQLite/PostgreSQL configuration, adding new backends
 - **[Embedding Models](docs/embedding-models.md)** - Available models, switching models
