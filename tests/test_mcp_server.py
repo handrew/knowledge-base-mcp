@@ -69,16 +69,18 @@ class TestMCPTools:
         mcp_tools.add_document("Python is great for data science", "test")
 
         # Test keyword search
-        results = mcp_tools.search("Python", mode="keyword", limit=5)
-        assert isinstance(results, list)
+        result = mcp_tools.search("Python", mode="keyword", limit=5)
+        assert "results" in result
+        assert "total_count" in result
+        assert isinstance(result["results"], list)
 
         # Test hybrid search
-        results = mcp_tools.search("programming", mode="hybrid", limit=5)
-        assert isinstance(results, list)
+        result = mcp_tools.search("programming", mode="hybrid", limit=5)
+        assert isinstance(result["results"], list)
 
         # Test semantic search
-        results = mcp_tools.search("coding", mode="semantic", limit=5)
-        assert isinstance(results, list)
+        result = mcp_tools.search("coding", mode="semantic", limit=5)
+        assert isinstance(result["results"], list)
 
     def test_semantic_search_scores_are_meaningful(self, mcp_tools):
         """Test that semantic search returns meaningful scores that differentiate results."""
@@ -88,7 +90,8 @@ class TestMCPTools:
         mcp_tools.add_document("The weather today is sunny and warm", "weather_test")
 
         # Search for ML-related content
-        results = mcp_tools.search("artificial intelligence and machine learning", mode="semantic", limit=3)
+        result = mcp_tools.search("artificial intelligence and machine learning", mode="semantic", limit=3)
+        results = result["results"]
 
         assert len(results) >= 2, "Should return at least 2 results"
 
@@ -116,7 +119,8 @@ class TestMCPTools:
         mcp_tools.add_document("Travel guide to European destinations", "travel_test")
 
         # Search for database-related content
-        results = mcp_tools.search("database", mode="keyword", limit=5)
+        result = mcp_tools.search("database", mode="keyword", limit=5)
+        results = result["results"]
 
         assert len(results) >= 2, "Should return at least 2 results"
 
@@ -128,15 +132,25 @@ class TestMCPTools:
         scores = [r["score"] for r in results]
         assert all(s > 0 for s in scores), f"Keyword scores should be positive, got {scores}"
 
-    def test_get_document(self, mcp_tools):
-        """Test get_document tool."""
-        # Add and retrieve
+    def test_get_documents(self, mcp_tools):
+        """Test get_documents tool."""
+        # Add and retrieve single doc
         result = mcp_tools.add_document("Retrievable content", "test")
         doc_id = result["id"]
 
-        doc = mcp_tools.get_document(doc_id)
-        assert doc is not None
-        assert doc["content"] == "Retrievable content"
+        result = mcp_tools.get_documents(doc_id)
+        assert len(result["documents"]) == 1
+        assert result["documents"][0]["content"] == "Retrievable content"
+        assert len(result["not_found"]) == 0
+
+    def test_get_documents_multiple(self, mcp_tools):
+        """Test get_documents with multiple IDs."""
+        result1 = mcp_tools.add_document("Doc one", "test")
+        result2 = mcp_tools.add_document("Doc two", "test")
+
+        result = mcp_tools.get_documents([result1["id"], result2["id"], 99999])
+        assert len(result["documents"]) == 2
+        assert 99999 in result["not_found"]
 
     def test_delete_document(self, mcp_tools):
         """Test delete_document tool."""
@@ -147,8 +161,9 @@ class TestMCPTools:
         assert delete_result["deleted"] is True
 
         # Verify it's gone
-        doc = mcp_tools.get_document(doc_id)
-        assert doc is None
+        result = mcp_tools.get_documents(doc_id)
+        assert len(result["documents"]) == 0
+        assert doc_id in result["not_found"]
 
     def test_stats(self, mcp_tools):
         """Test stats tool."""
@@ -320,23 +335,6 @@ class TestMCPMetadataTools:
         assert "deleted" in result
         assert result["deleted"] >= 1
 
-    def test_find_duplicate_tool(self, mcp_tools):
-        """Test find_duplicate tool."""
-        # Add a document
-        add_result = mcp_tools.add_document("Unique text for dedup test", "test")
-        doc_id = add_result["id"]
-
-        # Find duplicate
-        result = mcp_tools.find_duplicate("Unique text for dedup test")
-        assert result["duplicate_found"] is True
-        assert result["doc_id"] == doc_id
-
-    def test_find_duplicate_not_found(self, mcp_tools):
-        """Test find_duplicate when no duplicate exists."""
-        result = mcp_tools.find_duplicate("This content does not exist in the KB")
-        assert result["duplicate_found"] is False
-        assert result["doc_id"] is None
-
     def test_add_document_check_duplicate(self, mcp_tools):
         """Test add_document with check_duplicate flag."""
         # Add first document
@@ -421,7 +419,8 @@ class TestMCPSearchMetadataFilter:
         mcp_tools.add_document("Python snake", "test", metadata={"topic": "animals"})
 
         # Search with filter
-        results = mcp_tools.search("python", metadata_filter={"topic": "code"})
+        result = mcp_tools.search("python", metadata_filter={"topic": "code"})
+        results = result["results"]
         assert len(results) >= 1
         # Result should be about programming, not snakes
         assert any("programming" in r["content"] for r in results)
@@ -457,9 +456,9 @@ class TestSearchFeatures:
         mcp_tools.add_document("Unrelated content about cooking", "test")
 
         # Search with high min_score - should filter out low-relevance results
-        results = mcp_tools.search("python programming", min_score=0.5)
+        result = mcp_tools.search("python programming", min_score=0.5)
         # All results should have score >= 0.5
-        for r in results:
+        for r in result["results"]:
             assert r["score"] >= 0.5
 
     def test_search_content_preview_length(self, mcp_tools):
@@ -468,10 +467,21 @@ class TestSearchFeatures:
         mcp_tools.add_document(long_content, "test")
 
         # Search with truncation
-        results = mcp_tools.search("python", content_preview_length=50)
-        assert len(results) >= 1
+        result = mcp_tools.search("python", content_preview_length=50)
+        assert len(result["results"]) >= 1
         # Content should be truncated
-        assert len(results[0]["content"]) <= 53  # 50 + "..."
+        assert len(result["results"][0]["content"]) <= 53  # 50 + "..."
+
+    def test_search_total_count(self, mcp_tools):
+        """Test that search returns total_count."""
+        # Add several documents
+        for i in range(10):
+            mcp_tools.add_document(f"Document number {i} about testing", "count_test")
+
+        # Search with low limit
+        result = mcp_tools.search("testing", limit=3)
+        assert len(result["results"]) == 3
+        assert result["total_count"] >= 10  # At least 10 matches
 
 
 class TestExpiresIn:

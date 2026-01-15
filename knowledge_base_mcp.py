@@ -56,7 +56,7 @@ def search(
     metadata_filter: dict = None,
     min_score: float = None,
     content_preview_length: int = None
-) -> list[dict]:
+) -> dict:
     """
     Search the knowledge base.
 
@@ -71,18 +71,27 @@ def search(
         content_preview_length: If set, truncate content to this many characters (useful for large docs)
 
     Returns:
-        List of matching documents with id, content, source, and relevance score
+        Dict with 'results' (list of matching documents) and 'total_count' (total matches before limit)
     """
+    # Fetch more results to get accurate total count
+    fetch_limit = max(limit * 10, 100)
+
     if mode == "semantic":
-        results = kb.search_semantic(query, limit, metadata_filter)
+        all_results = kb.search_semantic(query, fetch_limit, metadata_filter)
     elif mode == "keyword":
-        results = kb.search_keyword(query, limit, metadata_filter)
+        all_results = kb.search_keyword(query, fetch_limit, metadata_filter)
     else:
-        results = kb.search_hybrid(query, limit, metadata_filter=metadata_filter)
+        all_results = kb.search_hybrid(query, fetch_limit, metadata_filter=metadata_filter)
 
     # Apply min_score filter
     if min_score is not None:
-        results = [r for r in results if r["score"] >= min_score]
+        all_results = [r for r in all_results if r["score"] >= min_score]
+
+    # Get total count before applying limit
+    total_count = len(all_results)
+
+    # Apply limit
+    results = all_results[:limit]
 
     # Truncate content if requested
     if content_preview_length is not None:
@@ -90,7 +99,7 @@ def search(
             if len(r["content"]) > content_preview_length:
                 r["content"] = r["content"][:content_preview_length] + "..."
 
-    return results
+    return {"results": results, "total_count": total_count}
 
 
 def _parse_expires_in(expires_in: str | int) -> str:
@@ -325,17 +334,31 @@ def update_by_filter(
 
 
 @mcp.tool()
-def get_document(doc_id: int) -> dict | None:
+def get_documents(doc_ids: int | list[int]) -> dict:
     """
-    Get a specific document by ID.
+    Get one or more documents by ID.
 
     Args:
-        doc_id: The document ID
+        doc_ids: A single document ID or list of document IDs
 
     Returns:
-        The document or None if not found
+        Dict with 'documents' (list of found documents) and 'not_found' (list of IDs not found)
     """
-    return kb.get(doc_id)
+    # Normalize to list
+    if isinstance(doc_ids, int):
+        doc_ids = [doc_ids]
+
+    documents = []
+    not_found = []
+
+    for doc_id in doc_ids:
+        doc = kb.get(doc_id)
+        if doc:
+            documents.append(doc)
+        else:
+            not_found.append(doc_id)
+
+    return {"documents": documents, "not_found": not_found}
 
 
 @mcp.tool()
@@ -456,23 +479,6 @@ def cleanup_expired() -> dict:
     """
     deleted = kb.cleanup_expired()
     return {"deleted": deleted}
-
-
-@mcp.tool()
-def find_duplicate(content: str) -> dict:
-    """
-    Check if a document with the exact same content already exists.
-
-    Useful for deduplication before adding new documents.
-
-    Args:
-        content: The content to check for
-
-    Returns:
-        The document ID if a duplicate exists, or null if no duplicate found
-    """
-    doc_id = kb.find_duplicate(content)
-    return {"duplicate_found": doc_id is not None, "doc_id": doc_id}
 
 
 if __name__ == "__main__":

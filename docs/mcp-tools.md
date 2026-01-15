@@ -1,16 +1,18 @@
 # MCP Tools Reference
 
-The knowledge base exposes 13 tools via MCP (Model Context Protocol).
+The knowledge base exposes 12 tools via MCP (Model Context Protocol).
 
 ## Search
 
 | Tool | Description |
 |------|-------------|
-| `search(query, mode, limit, metadata_filter, min_score, content_preview_length)` | Search with mode: "semantic", "keyword", or "hybrid". Filter by metadata, score threshold, and truncate content. |
+| `search(query, mode, limit, metadata_filter, min_score, content_preview_length)` | Search with mode: "semantic", "keyword", or "hybrid". Returns `{results, total_count}`. |
 
-**New parameters:**
+**Parameters:**
 - `min_score`: Filter out results below this relevance threshold (0.0-1.0)
 - `content_preview_length`: Truncate content to N characters (useful for large docs)
+
+**Returns:** `{"results": [...], "total_count": N}` - total_count shows how many matches exist (useful for deciding whether to refine query or paginate)
 
 ## Document CRUD
 
@@ -18,13 +20,14 @@ The knowledge base exposes 13 tools via MCP (Model Context Protocol).
 |------|-------------|
 | `add_document(content, source, metadata, expires_at, expires_in, check_duplicate)` | Add a document with optional metadata and expiration |
 | `add_documents(documents, check_duplicate)` | Batch add with efficient batch embedding |
-| `get_document(doc_id)` | Retrieve a document by ID |
+| `get_documents(doc_ids)` | Retrieve one or more documents by ID. Returns `{documents, not_found}` |
 | `update_document(doc_id, content, source, metadata, expires_at, metadata_merge)` | Update document, optionally merge metadata |
 | `append_to_document(doc_id, content, separator)` | Append content to an existing document |
 | `delete_document(doc_id)` | Remove a document by ID |
 
-**New parameter:**
+**Parameters:**
 - `expires_in`: TTL as seconds (int) or duration string ("1h", "30m", "7d") - easier than ISO timestamps
+- `doc_ids`: Single int or list of ints for batch retrieval
 
 ## Bulk Operations
 
@@ -38,7 +41,6 @@ The knowledge base exposes 13 tools via MCP (Model Context Protocol).
 | Tool | Description |
 |------|-------------|
 | `list_documents(source, metadata_filter, limit, offset)` | List/filter documents with pagination |
-| `find_duplicate(content)` | Check if content already exists |
 | `cleanup_expired()` | Manually trigger expiration cleanup |
 
 ## System
@@ -51,13 +53,16 @@ The knowledge base exposes 13 tools via MCP (Model Context Protocol).
 - `reembed()` - Rare admin operation for switching embedding models
 - `ingest_file()` - File ingestion with chunking (agents can do this themselves)
 - `list_backends()` - One-time setup operation
+- `find_duplicate()` - Use `check_duplicate=True` on add_document instead
 
 ## Examples
 
 ```python
 # Search with quality filter and preview
-search("how to configure webpack", mode="hybrid", limit=5, min_score=0.5)
-search("python", metadata_filter={"topic": "programming"}, content_preview_length=200)
+result = search("how to configure webpack", mode="hybrid", limit=5, min_score=0.5)
+# result = {"results": [...], "total_count": 15}
+
+result = search("python", metadata_filter={"topic": "programming"}, content_preview_length=200)
 
 # Add document with TTL (easier than ISO timestamps)
 add_document(
@@ -84,6 +89,11 @@ add_documents([
 # Add with deduplication check
 add_document("Same content", source="notes", check_duplicate=True)
 
+# Get one or more documents by ID
+result = get_documents(1)  # Single ID
+result = get_documents([1, 2, 3])  # Multiple IDs
+# result = {"documents": [...], "not_found": [3]}
+
 # Update a document with metadata merge
 update_document(doc_id=1, metadata={"reviewed": True}, metadata_merge=True)  # Preserves existing metadata
 
@@ -107,9 +117,6 @@ update_by_filter(
 
 # List documents with filters
 list_documents(source="meetings", metadata_filter={"project": "alpha"}, limit=10)
-
-# Check for duplicates before adding
-find_duplicate("Some content to check")
 
 # Check what's in the KB
 stats()
