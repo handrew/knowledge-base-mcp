@@ -247,6 +247,15 @@ class TestBackendFactory:
             def get_embedding_stats(self):
                 return []
 
+            def update(self, doc_id, content=None, source=None, embedding=None, embedding_model=None):
+                return False
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                pass
+
             @property
             def backend_type(self):
                 return "mock"
@@ -391,6 +400,108 @@ class TestSQLiteBackend:
 
         backend.add("Doc 2", "test", None, None)
         assert backend.count() == 2
+
+    # -------------------------------------------------------------------------
+    # Update Tests
+    # -------------------------------------------------------------------------
+
+    def test_update_content(self, backend):
+        """Test updating document content."""
+        doc_id = backend.add("Original content", "test", [0.1, 0.2], "model1")
+
+        success = backend.update(doc_id, content="Updated content")
+        assert success is True
+
+        doc = backend.get(doc_id)
+        assert doc.content == "Updated content"
+        assert doc.source == "test"  # Unchanged
+
+    def test_update_source(self, backend):
+        """Test updating document source."""
+        doc_id = backend.add("Test content", "original_source", None, None)
+
+        success = backend.update(doc_id, source="new_source")
+        assert success is True
+
+        doc = backend.get(doc_id)
+        assert doc.content == "Test content"  # Unchanged
+        assert doc.source == "new_source"
+
+    def test_update_content_and_source(self, backend):
+        """Test updating both content and source."""
+        doc_id = backend.add("Original", "old_source", None, None)
+
+        success = backend.update(doc_id, content="New content", source="new_source")
+        assert success is True
+
+        doc = backend.get(doc_id)
+        assert doc.content == "New content"
+        assert doc.source == "new_source"
+
+    def test_update_embedding(self, backend):
+        """Test updating document embedding."""
+        doc_id = backend.add("Test", "test", [0.1, 0.2], "model1")
+
+        success = backend.update(doc_id, embedding=[0.9, 0.8, 0.7], embedding_model="model2")
+        assert success is True
+
+        # Verify embedding was updated
+        embeddings = backend.get_all_embeddings()
+        assert len(embeddings) == 1
+        _, _, _, emb = embeddings[0]
+        assert len(emb) == 3
+        assert emb[0] == pytest.approx(0.9, abs=1e-6)
+
+    def test_update_nonexistent_document(self, backend):
+        """Test updating a non-existent document."""
+        success = backend.update(9999, content="New content")
+        assert success is False
+
+    def test_update_no_fields(self, backend):
+        """Test update with no fields specified."""
+        doc_id = backend.add("Test", "test", None, None)
+
+        # Should return True (doc exists) but not change anything
+        success = backend.update(doc_id)
+        assert success is True
+
+        doc = backend.get(doc_id)
+        assert doc.content == "Test"
+
+    def test_update_preserves_other_fields(self, backend):
+        """Test that update preserves fields not being updated."""
+        doc_id = backend.add("Content", "source", [0.1, 0.2], "model")
+
+        # Update only content
+        backend.update(doc_id, content="New content")
+
+        doc = backend.get(doc_id)
+        assert doc.content == "New content"
+        assert doc.source == "source"
+        assert doc.embedding_model == "model"
+
+        # Verify embedding preserved
+        embeddings = backend.get_all_embeddings()
+        assert len(embeddings) == 1
+
+    def test_update_fts_sync(self, backend):
+        """Test that FTS index is updated when content changes."""
+        doc_id = backend.add("Python programming language", "test", None, None)
+
+        # Should find it with original content
+        results = backend.search_keyword("Python", limit=5)
+        assert len(results) == 1
+
+        # Update content
+        backend.update(doc_id, content="Java programming language")
+
+        # Should no longer find "Python"
+        results = backend.search_keyword("Python", limit=5)
+        assert len(results) == 0
+
+        # Should find "Java"
+        results = backend.search_keyword("Java", limit=5)
+        assert len(results) == 1
 
     # -------------------------------------------------------------------------
     # Keyword Search Tests

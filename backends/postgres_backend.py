@@ -197,6 +197,46 @@ class PostgresBackend(BaseBackend):
             )
         return None
 
+    def update(
+        self,
+        doc_id: int,
+        content: str | None = None,
+        source: str | None = None,
+        embedding: list[float] | None = None,
+        embedding_model: str | None = None
+    ) -> bool:
+        """Update an existing document."""
+        # Build dynamic UPDATE query based on provided fields
+        updates = []
+        params = []
+
+        if content is not None:
+            updates.append("content = %s")
+            params.append(content)
+        if source is not None:
+            updates.append("source = %s")
+            params.append(source)
+        if embedding is not None:
+            updates.append("embedding = %s")
+            params.append(embedding)
+        if embedding_model is not None:
+            updates.append("embedding_model = %s")
+            params.append(embedding_model)
+
+        if not updates:
+            # Nothing to update, check if doc exists
+            return self.get(doc_id) is not None
+
+        params.append(doc_id)
+        query = f"UPDATE {self._table_docs} SET {', '.join(updates)} WHERE id = %s"
+
+        with self.conn.cursor() as cur:
+            cur.execute(query, params)
+            updated = cur.rowcount > 0
+
+        self.conn.commit()
+        return updated
+
     def delete(self, doc_id: int) -> bool:
         """Delete a document by ID."""
         with self.conn.cursor() as cur:

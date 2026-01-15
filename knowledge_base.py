@@ -192,6 +192,54 @@ class KnowledgeBase:
             for id, data in ranked[:limit]
         ]
 
+    def update(self, doc_id: int, content: str | None = None, source: str | None = None) -> bool:
+        """Update an existing document.
+
+        If content is updated, the embedding is automatically regenerated.
+
+        Args:
+            doc_id: The document ID to update
+            content: New content (optional)
+            source: New source (optional)
+
+        Returns:
+            True if the document was updated, False if not found
+        """
+        # If content is being updated, regenerate embedding
+        embedding = None
+        embedding_model = None
+        if content is not None:
+            embedding = self._embed(content, is_query=False)
+            embedding_model = self.model_name
+
+        return self.backend.update(
+            doc_id,
+            content=content,
+            source=source,
+            embedding=embedding,
+            embedding_model=embedding_model
+        )
+
+    def append(self, doc_id: int, content: str, separator: str = "\n\n") -> bool:
+        """Append content to an existing document.
+
+        The new content is concatenated to the existing content with a separator,
+        and the embedding is regenerated for the combined text.
+
+        Args:
+            doc_id: The document ID to append to
+            content: Content to append
+            separator: Separator between existing and new content (default: double newline)
+
+        Returns:
+            True if the document was updated, False if not found
+        """
+        doc = self.get(doc_id)
+        if not doc:
+            return False
+        new_content = doc["content"] + separator + content
+        return self.update(doc_id, content=new_content)
+
     def delete(self, doc_id: int) -> bool:
         """Delete a document by ID."""
         return self.backend.delete(doc_id)

@@ -101,6 +101,52 @@ def add_documents(documents: list[dict]) -> dict:
 
 
 @mcp.tool()
+def update_document(doc_id: int, content: str = None, source: str = None) -> dict:
+    """
+    Update an existing document in the knowledge base.
+
+    If content is updated, the embedding is automatically regenerated.
+    Only provided fields are updated.
+
+    Args:
+        doc_id: The document ID to update
+        content: New content (optional)
+        source: New source (optional)
+
+    Returns:
+        Status of the update with the updated document
+    """
+    success = kb.update(doc_id, content=content, source=source)
+    if success:
+        doc = kb.get(doc_id)
+        return {"id": doc_id, "updated": True, "document": doc}
+    return {"id": doc_id, "updated": False, "error": "Document not found"}
+
+
+@mcp.tool()
+def append_to_document(doc_id: int, content: str, separator: str = "\n\n") -> dict:
+    """
+    Append content to an existing document in the knowledge base.
+
+    The new content is added to the end of the existing content,
+    and the embedding is regenerated for the combined text.
+
+    Args:
+        doc_id: The document ID to append to
+        content: Content to append
+        separator: Separator between existing and new content (default: double newline)
+
+    Returns:
+        Status of the append with the updated document
+    """
+    success = kb.append(doc_id, content, separator=separator)
+    if success:
+        doc = kb.get(doc_id)
+        return {"id": doc_id, "appended": True, "document": doc}
+    return {"id": doc_id, "appended": False, "error": "Document not found"}
+
+
+@mcp.tool()
 def delete_document(doc_id: int) -> dict:
     """
     Delete a document from the knowledge base.

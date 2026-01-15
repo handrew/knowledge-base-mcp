@@ -180,6 +180,60 @@ class TestMCPTools:
         backend_names = [b["name"] for b in result["backends"]]
         assert "sqlite" in backend_names
 
+    def test_update_document(self, mcp_tools):
+        """Test update_document tool."""
+        # Add a document first
+        result = mcp_tools.add_document("Original content", "test")
+        doc_id = result["id"]
+
+        # Update it
+        update_result = mcp_tools.update_document(doc_id, content="Updated content")
+        assert update_result["updated"] is True
+        assert update_result["document"]["content"] == "Updated content"
+
+    def test_update_document_source_only(self, mcp_tools):
+        """Test updating only the source."""
+        result = mcp_tools.add_document("Test content", "old_source")
+        doc_id = result["id"]
+
+        update_result = mcp_tools.update_document(doc_id, source="new_source")
+        assert update_result["updated"] is True
+        assert update_result["document"]["source"] == "new_source"
+        assert update_result["document"]["content"] == "Test content"
+
+    def test_update_document_not_found(self, mcp_tools):
+        """Test updating non-existent document."""
+        result = mcp_tools.update_document(99999, content="New content")
+        assert result["updated"] is False
+        assert "error" in result
+
+    def test_append_to_document(self, mcp_tools):
+        """Test append_to_document tool."""
+        # Add a document first
+        result = mcp_tools.add_document("First part", "test")
+        doc_id = result["id"]
+
+        # Append to it
+        append_result = mcp_tools.append_to_document(doc_id, "Second part")
+        assert append_result["appended"] is True
+        assert "First part" in append_result["document"]["content"]
+        assert "Second part" in append_result["document"]["content"]
+
+    def test_append_to_document_custom_separator(self, mcp_tools):
+        """Test append with custom separator."""
+        result = mcp_tools.add_document("Line 1", "test")
+        doc_id = result["id"]
+
+        append_result = mcp_tools.append_to_document(doc_id, "Line 2", separator=" -> ")
+        assert append_result["appended"] is True
+        assert append_result["document"]["content"] == "Line 1 -> Line 2"
+
+    def test_append_to_document_not_found(self, mcp_tools):
+        """Test appending to non-existent document."""
+        result = mcp_tools.append_to_document(99999, "New content")
+        assert result["appended"] is False
+        assert "error" in result
+
 
 class TestMCPIngestFile:
     """Test file ingestion."""

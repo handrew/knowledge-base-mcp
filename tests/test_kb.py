@@ -112,6 +112,123 @@ class TestBasicOperations:
         assert kb.count() == 3
 
 
+class TestUpdate:
+    """Test update and append functionality."""
+
+    def test_update_content(self, kb):
+        """Test updating document content."""
+        doc_id = kb.add("Original content", "test")
+
+        success = kb.update(doc_id, content="Updated content")
+        assert success is True
+
+        doc = kb.get(doc_id)
+        assert doc["content"] == "Updated content"
+        assert doc["source"] == "test"  # Unchanged
+
+    def test_update_source(self, kb):
+        """Test updating document source only."""
+        doc_id = kb.add("Test content", "original_source")
+
+        success = kb.update(doc_id, source="new_source")
+        assert success is True
+
+        doc = kb.get(doc_id)
+        assert doc["content"] == "Test content"  # Unchanged
+        assert doc["source"] == "new_source"
+
+    def test_update_content_and_source(self, kb):
+        """Test updating both content and source."""
+        doc_id = kb.add("Original", "old_source")
+
+        success = kb.update(doc_id, content="New content", source="new_source")
+        assert success is True
+
+        doc = kb.get(doc_id)
+        assert doc["content"] == "New content"
+        assert doc["source"] == "new_source"
+
+    def test_update_regenerates_embedding(self, kb, use_fast_model):
+        """Test that updating content regenerates embedding."""
+        doc_id = kb.add("Original content about Python", "test")
+
+        # Update with very different content
+        kb.update(doc_id, content="Completely different content about databases")
+
+        doc = kb.get(doc_id)
+        assert doc["embedding_model"] == use_fast_model
+
+        # Search should find it with new content
+        results = kb.search_keyword("databases", limit=5)
+        assert any(r["id"] == doc_id for r in results)
+
+    def test_update_nonexistent_document(self, kb):
+        """Test updating a non-existent document."""
+        success = kb.update(9999, content="New content")
+        assert success is False
+
+    def test_append_basic(self, kb):
+        """Test basic append functionality."""
+        doc_id = kb.add("First part.", "test")
+
+        success = kb.append(doc_id, "Second part.")
+        assert success is True
+
+        doc = kb.get(doc_id)
+        assert doc["content"] == "First part.\n\nSecond part."
+
+    def test_append_custom_separator(self, kb):
+        """Test append with custom separator."""
+        doc_id = kb.add("Line 1", "test")
+
+        success = kb.append(doc_id, "Line 2", separator=" | ")
+        assert success is True
+
+        doc = kb.get(doc_id)
+        assert doc["content"] == "Line 1 | Line 2"
+
+    def test_append_multiple_times(self, kb):
+        """Test appending multiple times."""
+        doc_id = kb.add("Part 1", "test")
+
+        kb.append(doc_id, "Part 2")
+        kb.append(doc_id, "Part 3")
+
+        doc = kb.get(doc_id)
+        assert doc["content"] == "Part 1\n\nPart 2\n\nPart 3"
+
+    def test_append_regenerates_embedding(self, kb):
+        """Test that append regenerates embedding for combined content."""
+        doc_id = kb.add("Python programming", "test")
+
+        # Append related content
+        kb.append(doc_id, "Also covers machine learning")
+
+        # Should now be searchable for both terms
+        results = kb.search_hybrid("machine learning", limit=5)
+        assert any(r["id"] == doc_id for r in results)
+
+    def test_append_nonexistent_document(self, kb):
+        """Test appending to a non-existent document."""
+        success = kb.append(9999, "New content")
+        assert success is False
+
+    def test_update_and_search(self, kb):
+        """Test that updated documents are properly searchable."""
+        doc_id = kb.add("Information about cats", "animals")
+
+        # Update to completely different topic
+        kb.update(doc_id, content="Information about databases and SQL")
+
+        # Should NOT find with old content
+        results = kb.search_keyword("cats", limit=5)
+        assert not any(r["id"] == doc_id for r in results)
+
+        # Should find with new content
+        results = kb.search_keyword("databases", limit=5)
+        assert any(r["id"] == doc_id for r in results)
+
+
 class TestSearch:
     """Test search functionality."""
 

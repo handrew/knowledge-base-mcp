@@ -163,6 +163,31 @@ class BaseBackend(ABC):
         pass
 
     @abstractmethod
+    def update(
+        self,
+        doc_id: int,
+        content: str | None = None,
+        source: str | None = None,
+        embedding: list[float] | None = None,
+        embedding_model: str | None = None
+    ) -> bool:
+        """Update an existing document.
+
+        Only provided fields are updated; None values are ignored.
+
+        Args:
+            doc_id: The document ID to update
+            content: New content (optional)
+            source: New source (optional)
+            embedding: New embedding vector (optional)
+            embedding_model: New embedding model name (optional)
+
+        Returns:
+            True if the document was updated, False if not found
+        """
+        pass
+
+    @abstractmethod
     def delete(self, doc_id: int) -> bool:
         """Delete a document by ID.
 
