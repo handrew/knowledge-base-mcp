@@ -49,7 +49,12 @@ kb = KnowledgeBase(backend_config=backend_config)
 
 
 @mcp.tool()
-def search(query: str, mode: str = "hybrid", limit: int = 5) -> list[dict]:
+def search(
+    query: str,
+    mode: str = "hybrid",
+    limit: int = 5,
+    metadata_filter: dict = None
+) -> list[dict]:
     """
     Search the knowledge base.
 
@@ -57,16 +62,19 @@ def search(query: str, mode: str = "hybrid", limit: int = 5) -> list[dict]:
         query: The search query
         mode: Search mode - "semantic" (vector similarity), "keyword" (FTS), or "hybrid" (both)
         limit: Maximum results to return (default: 5)
+        metadata_filter: Filter results by metadata key-value pairs (optional).
+                         Only documents matching ALL key-value pairs are returned.
+                         Example: {"project": "foo", "private": false}
 
     Returns:
         List of matching documents with id, content, source, and relevance score
     """
     if mode == "semantic":
-        return kb.search_semantic(query, limit)
+        return kb.search_semantic(query, limit, metadata_filter)
     elif mode == "keyword":
-        return kb.search_keyword(query, limit)
+        return kb.search_keyword(query, limit, metadata_filter)
     else:
-        return kb.search_hybrid(query, limit)
+        return kb.search_hybrid(query, limit, metadata_filter=metadata_filter)
 
 
 @mcp.tool()
@@ -125,7 +133,8 @@ def update_document(
     content: str = None,
     source: str = None,
     metadata: dict = None,
-    expires_at: str = None
+    expires_at: str = None,
+    metadata_merge: bool = False
 ) -> dict:
     """
     Update an existing document in the knowledge base.
@@ -137,13 +146,14 @@ def update_document(
         doc_id: The document ID to update
         content: New content (optional)
         source: New source (optional)
-        metadata: New metadata dict (optional, replaces existing)
+        metadata: New metadata dict (optional)
         expires_at: New expiration timestamp (optional)
+        metadata_merge: If True, merge with existing metadata; if False, replace (default: False)
 
     Returns:
         Status of the update with the updated document
     """
-    success = kb.update(doc_id, content=content, source=source, metadata=metadata, expires_at=expires_at)
+    success = kb.update(doc_id, content=content, source=source, metadata=metadata, expires_at=expires_at, metadata_merge=metadata_merge)
     if success:
         doc = kb.get(doc_id)
         return {"id": doc_id, "updated": True, "document": doc}
@@ -186,6 +196,77 @@ def delete_document(doc_id: int) -> dict:
     """
     success = kb.delete(doc_id)
     return {"id": doc_id, "deleted": success}
+
+
+@mcp.tool()
+def delete_by_filter(
+    source: str = None,
+    metadata_filter: dict = None
+) -> dict:
+    """
+    Delete multiple documents matching the filter criteria.
+
+    At least one filter (source or metadata_filter) must be provided
+    to prevent accidental deletion of all documents.
+
+    Args:
+        source: Filter by source (optional)
+        metadata_filter: Filter by metadata key-value pairs (optional).
+                         Only documents matching ALL key-value pairs are deleted.
+                         Example: {"project": "foo", "deprecated": true}
+
+    Returns:
+        Number of documents deleted
+    """
+    if source is None and metadata_filter is None:
+        return {"error": "At least one filter (source or metadata_filter) must be provided"}
+    try:
+        deleted = kb.delete_by_filter(source=source, metadata_filter=metadata_filter)
+        return {"deleted": deleted}
+    except ValueError as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def update_by_filter(
+    source: str = None,
+    metadata_filter: dict = None,
+    new_source: str = None,
+    new_metadata: dict = None,
+    metadata_merge: bool = False
+) -> dict:
+    """
+    Update multiple documents matching the filter criteria.
+
+    At least one filter (source or metadata_filter) must be provided,
+    and at least one update (new_source or new_metadata) must be specified.
+
+    Args:
+        source: Filter by source (optional)
+        metadata_filter: Filter by metadata key-value pairs (optional).
+                         Only documents matching ALL key-value pairs are updated.
+        new_source: New source value to set (optional)
+        new_metadata: New metadata to set (optional)
+        metadata_merge: If True, merge with existing metadata; if False, replace (default: False)
+
+    Returns:
+        Number of documents updated
+    """
+    if source is None and metadata_filter is None:
+        return {"error": "At least one filter (source or metadata_filter) must be provided"}
+    if new_source is None and new_metadata is None:
+        return {"error": "At least one update (new_source or new_metadata) must be provided"}
+    try:
+        updated = kb.update_by_filter(
+            source=source,
+            metadata_filter=metadata_filter,
+            new_source=new_source,
+            new_metadata=new_metadata,
+            metadata_merge=metadata_merge
+        )
+        return {"updated": updated}
+    except ValueError as e:
+        return {"error": str(e)}
 
 
 @mcp.tool()

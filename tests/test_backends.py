@@ -259,6 +259,12 @@ class TestBackendFactory:
             def find_duplicate(self, content):
                 return None
 
+            def delete_by_filter(self, source=None, metadata_filter=None):
+                return 0
+
+            def update_by_filter(self, source=None, metadata_filter=None, new_source=None, new_metadata=None, metadata_merge=False):
+                return 0
+
             def commit(self):
                 pass
 

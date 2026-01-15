@@ -576,5 +576,206 @@ class TestDeduplication:
         assert kb.count() == 2
 
 
+class TestBulkOperations:
+    """Test bulk update and delete operations."""
+
+    def test_delete_by_filter_source(self, kb):
+        """Test deleting documents by source filter."""
+        kb.add("Doc 1", "source_a")
+        kb.add("Doc 2", "source_a")
+        kb.add("Doc 3", "source_b")
+
+        deleted = kb.delete_by_filter(source="source_a")
+        assert deleted == 2
+        assert kb.count() == 1
+
+        docs = kb.list_documents()
+        assert docs[0]["source"] == "source_b"
+
+    def test_delete_by_filter_metadata(self, kb):
+        """Test deleting documents by metadata filter."""
+        kb.add("Doc 1", "test", metadata={"project": "alpha", "status": "archived"})
+        kb.add("Doc 2", "test", metadata={"project": "alpha", "status": "active"})
+        kb.add("Doc 3", "test", metadata={"project": "beta", "status": "archived"})
+
+        # Delete archived from project alpha
+        deleted = kb.delete_by_filter(metadata_filter={"project": "alpha", "status": "archived"})
+        assert deleted == 1
+        assert kb.count() == 2
+
+    def test_delete_by_filter_requires_filter(self, kb):
+        """Test that delete_by_filter requires at least one filter."""
+        kb.add("Doc 1", "test")
+
+        with pytest.raises(ValueError):
+            kb.delete_by_filter()
+
+    def test_update_by_filter_source(self, kb):
+        """Test bulk updating source field."""
+        kb.add("Doc 1", "old_source")
+        kb.add("Doc 2", "old_source")
+        kb.add("Doc 3", "other_source")
+
+        updated = kb.update_by_filter(source="old_source", new_source="new_source")
+        assert updated == 2
+
+        docs = kb.list_documents(source="new_source")
+        assert len(docs) == 2
+
+        docs = kb.list_documents(source="old_source")
+        assert len(docs) == 0
+
+    def test_update_by_filter_metadata_replace(self, kb):
+        """Test bulk updating metadata with replace mode."""
+        kb.add("Doc 1", "test", metadata={"project": "alpha", "version": 1})
+        kb.add("Doc 2", "test", metadata={"project": "alpha", "version": 2})
+
+        updated = kb.update_by_filter(
+            metadata_filter={"project": "alpha"},
+            new_metadata={"status": "archived"}
+        )
+        assert updated == 2
+
+        docs = kb.list_documents()
+        # Metadata should be replaced, not merged
+        for doc in docs:
+            assert doc["metadata"] == {"status": "archived"}
+
+    def test_update_by_filter_metadata_merge(self, kb):
+        """Test bulk updating metadata with merge mode."""
+        kb.add("Doc 1", "test", metadata={"project": "alpha", "version": 1})
+        kb.add("Doc 2", "test", metadata={"project": "alpha", "version": 2})
+
+        updated = kb.update_by_filter(
+            metadata_filter={"project": "alpha"},
+            new_metadata={"status": "archived"},
+            metadata_merge=True
+        )
+        assert updated == 2
+
+        docs = kb.list_documents()
+        # Metadata should be merged - original fields preserved
+        for doc in docs:
+            assert doc["metadata"]["project"] == "alpha"
+            assert doc["metadata"]["status"] == "archived"
+            assert "version" in doc["metadata"]
+
+    def test_update_by_filter_requires_filter(self, kb):
+        """Test that update_by_filter requires at least one filter."""
+        kb.add("Doc 1", "test")
+
+        with pytest.raises(ValueError):
+            kb.update_by_filter(new_source="new")
+
+    def test_update_by_filter_requires_update(self, kb):
+        """Test that update_by_filter requires at least one update field."""
+        kb.add("Doc 1", "test")
+
+        with pytest.raises(ValueError):
+            kb.update_by_filter(source="test")
+
+
+class TestMetadataMerge:
+    """Test metadata merge functionality in single document update."""
+
+    def test_update_metadata_merge(self, kb):
+        """Test updating document with metadata merge."""
+        doc_id = kb.add("Test", "test", metadata={"a": 1, "b": 2})
+
+        kb.update(doc_id, metadata={"b": 3, "c": 4}, metadata_merge=True)
+
+        doc = kb.get(doc_id)
+        # Should merge: a preserved, b updated, c added
+        assert doc["metadata"] == {"a": 1, "b": 3, "c": 4}
+
+    def test_update_metadata_replace(self, kb):
+        """Test updating document with metadata replace (default)."""
+        doc_id = kb.add("Test", "test", metadata={"a": 1, "b": 2})
+
+        kb.update(doc_id, metadata={"c": 3})
+
+        doc = kb.get(doc_id)
+        # Should replace completely
+        assert doc["metadata"] == {"c": 3}
+
+
+class TestSearchMetadataFilter:
+    """Test metadata filtering in search methods."""
+
+    def test_keyword_search_with_metadata_filter(self, kb):
+        """Test keyword search with metadata filter."""
+        kb.add("Python programming language", "test", metadata={"topic": "programming"})
+        kb.add("Python snake species", "test", metadata={"topic": "animals"})
+
+        # Search for "python" but only in programming topic
+        results = kb.search_keyword("python", metadata_filter={"topic": "programming"})
+        assert len(results) == 1
+        assert "programming" in results[0]["content"]
+
+    def test_semantic_search_with_metadata_filter(self, kb):
+        """Test semantic search with metadata filter."""
+        kb.add("Machine learning with neural networks", "test", metadata={"category": "AI"})
+        kb.add("Machine tools for manufacturing", "test", metadata={"category": "industrial"})
+
+        # Search semantically but filter to AI category
+        results = kb.search_semantic("machine", metadata_filter={"category": "AI"})
+        assert len(results) == 1
+        assert "neural" in results[0]["content"]
+
+    def test_hybrid_search_with_metadata_filter(self, kb):
+        """Test hybrid search with metadata filter."""
+        kb.add("Database query optimization", "test", metadata={"level": "advanced"})
+        kb.add("Database basics for beginners", "test", metadata={"level": "beginner"})
+
+        # Search for database content but only advanced level
+        results = kb.search_hybrid("database", metadata_filter={"level": "advanced"})
+        assert len(results) == 1
+        assert "optimization" in results[0]["content"]
+
+
+class TestBatchEmbedding:
+    """Test batch embedding functionality."""
+
+    def test_add_batch_uses_batch_embedding(self, kb):
+        """Test that add_batch creates documents with embeddings."""
+        docs = [
+            {"content": "First document about Python", "source": "batch"},
+            {"content": "Second document about JavaScript", "source": "batch"},
+            {"content": "Third document about databases", "source": "batch"},
+        ]
+        ids = kb.add_batch(docs)
+        assert len(ids) == 3
+
+        # All documents should have embeddings
+        for doc_id in ids:
+            doc = kb.get(doc_id)
+            assert doc["embedding_model"] is not None
+
+        # Search should work on all documents
+        results = kb.search_semantic("programming language")
+        assert len(results) >= 1
+
+    def test_add_batch_with_duplicates(self, kb):
+        """Test batch add with duplicate checking."""
+        # Add first document
+        kb.add("Duplicate content", "original")
+
+        # Batch add with same content
+        docs = [
+            {"content": "Duplicate content", "source": "batch"},
+            {"content": "New content", "source": "batch"},
+        ]
+        ids = kb.add_batch(docs, check_duplicate=True)
+
+        # Should return 2 IDs but only 2 total documents in DB
+        assert len(ids) == 2
+        assert kb.count() == 2  # Original + new content
+
+    def test_add_batch_empty(self, kb):
+        """Test batch add with empty list."""
+        ids = kb.add_batch([])
+        assert ids == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

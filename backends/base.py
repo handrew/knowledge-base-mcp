@@ -371,6 +371,50 @@ class BaseBackend(ABC):
         pass
 
     # -------------------------------------------------------------------------
+    # Bulk Operations
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    def delete_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None
+    ) -> int:
+        """Delete documents matching the filter criteria.
+
+        Args:
+            source: Filter by source (optional)
+            metadata_filter: Filter by metadata key-value pairs (optional)
+
+        Returns:
+            Number of documents deleted
+        """
+        pass
+
+    @abstractmethod
+    def update_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        new_source: str | None = None,
+        new_metadata: dict[str, Any] | None = None,
+        metadata_merge: bool = False
+    ) -> int:
+        """Update documents matching the filter criteria.
+
+        Args:
+            source: Filter by source (optional)
+            metadata_filter: Filter by metadata key-value pairs (optional)
+            new_source: New source value to set (optional)
+            new_metadata: New metadata to set (optional)
+            metadata_merge: If True, merge with existing metadata; if False, replace
+
+        Returns:
+            Number of documents updated
+        """
+        pass
+
+    # -------------------------------------------------------------------------
     # Transaction Support (optional - default no-op implementations)
     # -------------------------------------------------------------------------
 

@@ -362,6 +362,103 @@ class TestMCPMetadataTools:
         assert doc_id1 == doc_id2
 
 
+class TestMCPBulkOperations:
+    """Test bulk operation MCP tools."""
+
+    def test_delete_by_filter_source(self, mcp_tools):
+        """Test delete_by_filter tool with source filter."""
+        # Add documents
+        mcp_tools.add_document("Doc to delete 1", "delete_source")
+        mcp_tools.add_document("Doc to delete 2", "delete_source")
+        mcp_tools.add_document("Doc to keep", "keep_source")
+
+        # Delete by source
+        result = mcp_tools.delete_by_filter(source="delete_source")
+        assert "deleted" in result
+        assert result["deleted"] == 2
+
+    def test_delete_by_filter_metadata(self, mcp_tools):
+        """Test delete_by_filter tool with metadata filter."""
+        mcp_tools.add_document("Doc 1", "test", metadata={"status": "archived"})
+        mcp_tools.add_document("Doc 2", "test", metadata={"status": "active"})
+
+        result = mcp_tools.delete_by_filter(metadata_filter={"status": "archived"})
+        assert "deleted" in result
+        assert result["deleted"] >= 1
+
+    def test_delete_by_filter_no_filter(self, mcp_tools):
+        """Test delete_by_filter without filter returns error."""
+        result = mcp_tools.delete_by_filter()
+        assert "error" in result
+
+    def test_update_by_filter_source(self, mcp_tools):
+        """Test update_by_filter tool with source filter."""
+        mcp_tools.add_document("Doc 1", "old_source")
+        mcp_tools.add_document("Doc 2", "old_source")
+
+        result = mcp_tools.update_by_filter(source="old_source", new_source="new_source")
+        assert "updated" in result
+        assert result["updated"] == 2
+
+    def test_update_by_filter_metadata_merge(self, mcp_tools):
+        """Test update_by_filter tool with metadata merge."""
+        mcp_tools.add_document("Doc 1", "merge_test", metadata={"a": 1, "b": 2})
+
+        result = mcp_tools.update_by_filter(
+            source="merge_test",
+            new_metadata={"c": 3},
+            metadata_merge=True
+        )
+        assert "updated" in result
+        assert result["updated"] >= 1
+
+    def test_update_by_filter_no_filter(self, mcp_tools):
+        """Test update_by_filter without filter returns error."""
+        result = mcp_tools.update_by_filter(new_source="new")
+        assert "error" in result
+
+    def test_update_by_filter_no_update(self, mcp_tools):
+        """Test update_by_filter without update returns error."""
+        result = mcp_tools.update_by_filter(source="test")
+        assert "error" in result
+
+
+class TestMCPSearchMetadataFilter:
+    """Test search with metadata filter."""
+
+    def test_search_with_metadata_filter(self, mcp_tools):
+        """Test search tool with metadata filter."""
+        mcp_tools.add_document("Python programming", "test", metadata={"topic": "code"})
+        mcp_tools.add_document("Python snake", "test", metadata={"topic": "animals"})
+
+        # Search with filter
+        results = mcp_tools.search("python", metadata_filter={"topic": "code"})
+        assert len(results) >= 1
+        # Result should be about programming, not snakes
+        assert any("programming" in r["content"] for r in results)
+
+
+class TestMCPUpdateMetadataMerge:
+    """Test update document with metadata merge."""
+
+    def test_update_document_metadata_merge(self, mcp_tools):
+        """Test update_document with metadata_merge flag."""
+        result = mcp_tools.add_document("Content", "test", metadata={"a": 1, "b": 2})
+        doc_id = result["id"]
+
+        update_result = mcp_tools.update_document(
+            doc_id,
+            metadata={"b": 3, "c": 4},
+            metadata_merge=True
+        )
+        assert update_result["updated"] is True
+        # Metadata should be merged
+        meta = update_result["document"]["metadata"]
+        assert meta["a"] == 1  # Preserved
+        assert meta["b"] == 3  # Updated
+        assert meta["c"] == 4  # Added
+
+
 class TestMigration:
     """Test database migration scenarios."""
 

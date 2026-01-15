@@ -105,6 +105,25 @@ class KnowledgeBase:
         embedding = model.encode(text, normalize_embeddings=True)
         return embedding.tolist()
 
+    def _embed_batch(self, texts: list[str], is_query: bool = False, model_name: str = None) -> list[list[float]]:
+        """Generate embeddings for multiple texts in a batch (more efficient)."""
+        if not texts:
+            return []
+
+        model_name = model_name or self.model_name
+        model = self._load_model(model_name)
+        model_config = MODELS.get(model_name, {})
+
+        # Some models use prefixes for query vs document
+        prefix = model_config.get("prefix")
+        if prefix:
+            query_prefix, doc_prefix = prefix
+            prefix_str = query_prefix if is_query else doc_prefix
+            texts = [prefix_str + t for t in texts]
+
+        embeddings = model.encode(texts, normalize_embeddings=True)
+        return [emb.tolist() for emb in embeddings]
+
     def add(
         self,
         content: str,
@@ -134,33 +153,112 @@ class KnowledgeBase:
         return self.backend.add(content, source, embedding, self.model_name, metadata, expires_at)
 
     def add_batch(self, documents: list[dict], check_duplicate: bool = False) -> list[int]:
-        """Add multiple documents.
+        """Add multiple documents with batch embedding for efficiency.
 
         Each dict should have:
             - content: str (required)
             - source: str (optional, defaults to "unknown")
             - metadata: dict (optional)
             - expires_at: str (optional, ISO format timestamp)
+
+        Uses batch embedding which is significantly faster than embedding
+        documents one at a time, especially for large batches.
         """
-        ids = []
+        if not documents:
+            return []
+
+        # Filter to valid documents and check duplicates if needed
+        valid_docs = []
         for doc in documents:
+            content = doc.get("content", "")
+            if not content:
+                continue
+            if check_duplicate:
+                existing_id = self.backend.find_duplicate(content)
+                if existing_id is not None:
+                    valid_docs.append({"existing_id": existing_id, **doc})
+                    continue
+            valid_docs.append(doc)
+
+        if not valid_docs:
+            return []
+
+        # Separate new docs (need embedding) from existing duplicates
+        new_docs = [d for d in valid_docs if "existing_id" not in d]
+        existing_ids = [d["existing_id"] for d in valid_docs if "existing_id" in d]
+
+        if not new_docs:
+            return existing_ids
+
+        # Batch embed all new documents at once
+        contents = [d.get("content", "") for d in new_docs]
+        embeddings = self._embed_batch(contents, is_query=False)
+
+        # Add documents with their embeddings
+        ids = list(existing_ids)  # Start with existing duplicate IDs
+        for doc, embedding in zip(new_docs, embeddings):
             content = doc.get("content", "")
             source = doc.get("source", "unknown")
             metadata = doc.get("metadata")
             expires_at = doc.get("expires_at")
-            if content:
-                doc_id = self.add(content, source, metadata, expires_at, check_duplicate)
-                if doc_id is not None:
-                    ids.append(doc_id)
+
+            doc_id = self.backend.add(content, source, embedding, self.model_name, metadata, expires_at)
+            ids.append(doc_id)
+
         return ids
 
-    def search_keyword(self, query: str, limit: int = 5) -> list[dict]:
-        """Full-text keyword search."""
-        results = self.backend.search_keyword(query, limit)
-        return [r.to_dict() for r in results]
+    def search_keyword(
+        self,
+        query: str,
+        limit: int = 5,
+        metadata_filter: dict | None = None
+    ) -> list[dict]:
+        """Full-text keyword search.
 
-    def search_semantic(self, query: str, limit: int = 5) -> list[dict]:
-        """Vector similarity search computed in memory."""
+        Args:
+            query: The search query
+            limit: Maximum results to return
+            metadata_filter: Filter results by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are returned.
+        """
+        # If filtering, fetch extra results to account for filtering
+        fetch_limit = limit * 3 if metadata_filter else limit
+        results = self.backend.search_keyword(query, fetch_limit)
+
+        if metadata_filter:
+            results = self._filter_by_metadata(results, metadata_filter)
+
+        return [r.to_dict() for r in results[:limit]]
+
+    def _filter_by_metadata(self, results: list, metadata_filter: dict) -> list:
+        """Filter search results by metadata."""
+        filtered = []
+        for r in results:
+            # Get full document to check metadata
+            doc = self.backend.get(r.id)
+            if doc and doc.metadata:
+                if all(doc.metadata.get(k) == v for k, v in metadata_filter.items()):
+                    r.metadata = doc.metadata
+                    filtered.append(r)
+            elif not metadata_filter:
+                # If no filter required, include all
+                filtered.append(r)
+        return filtered
+
+    def search_semantic(
+        self,
+        query: str,
+        limit: int = 5,
+        metadata_filter: dict | None = None
+    ) -> list[dict]:
+        """Vector similarity search computed in memory.
+
+        Args:
+            query: The search query
+            limit: Maximum results to return
+            metadata_filter: Filter results by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are returned.
+        """
         query_embedding = self._embed(query, is_query=True)
 
         # Fetch all documents with embeddings
@@ -172,6 +270,14 @@ class KnowledgeBase:
         # Compute similarities
         results = []
         for doc_id, content, source, embedding in docs:
+            # If filtering, check metadata before computing similarity
+            if metadata_filter:
+                doc = self.backend.get(doc_id)
+                if not doc or not doc.metadata:
+                    continue
+                if not all(doc.metadata.get(k) == v for k, v in metadata_filter.items()):
+                    continue
+
             similarity = cosine_similarity(query_embedding, embedding)
             results.append({
                 "id": doc_id,
@@ -184,10 +290,24 @@ class KnowledgeBase:
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
 
-    def search_hybrid(self, query: str, limit: int = 5, semantic_weight: float = 0.7) -> list[dict]:
-        """Hybrid search combining semantic and keyword results."""
-        semantic_results = self.search_semantic(query, limit * 2)
-        keyword_results = self.search_keyword(query, limit * 2)
+    def search_hybrid(
+        self,
+        query: str,
+        limit: int = 5,
+        semantic_weight: float = 0.7,
+        metadata_filter: dict | None = None
+    ) -> list[dict]:
+        """Hybrid search combining semantic and keyword results.
+
+        Args:
+            query: The search query
+            limit: Maximum results to return
+            semantic_weight: Weight for semantic vs keyword results (default: 0.7)
+            metadata_filter: Filter results by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are returned.
+        """
+        semantic_results = self.search_semantic(query, limit * 2, metadata_filter)
+        keyword_results = self.search_keyword(query, limit * 2, metadata_filter)
 
         # Normalize and combine scores
         scores = {}
@@ -231,7 +351,8 @@ class KnowledgeBase:
         content: str | None = None,
         source: str | None = None,
         metadata: dict | None = None,
-        expires_at: str | None = None
+        expires_at: str | None = None,
+        metadata_merge: bool = False
     ) -> bool:
         """Update an existing document.
 
@@ -241,8 +362,9 @@ class KnowledgeBase:
             doc_id: The document ID to update
             content: New content (optional)
             source: New source (optional)
-            metadata: New metadata dict (optional, replaces existing)
+            metadata: New metadata dict (optional)
             expires_at: New expiration timestamp (optional)
+            metadata_merge: If True, merge with existing metadata; if False, replace
 
         Returns:
             True if the document was updated, False if not found
@@ -254,13 +376,21 @@ class KnowledgeBase:
             embedding = self._embed(content, is_query=False)
             embedding_model = self.model_name
 
+        # Handle metadata merge at this level for consistency across backends
+        final_metadata = metadata
+        if metadata_merge and metadata is not None:
+            doc = self.get(doc_id)
+            if doc:
+                existing = doc.get("metadata") or {}
+                final_metadata = {**existing, **metadata}
+
         return self.backend.update(
             doc_id,
             content=content,
             source=source,
             embedding=embedding,
             embedding_model=embedding_model,
-            metadata=metadata,
+            metadata=final_metadata,
             expires_at=expires_at
         )
 
@@ -343,6 +473,54 @@ class KnowledgeBase:
             The document ID if a duplicate exists, None otherwise
         """
         return self.backend.find_duplicate(content)
+
+    def delete_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict | None = None
+    ) -> int:
+        """Delete documents matching the filter criteria.
+
+        Args:
+            source: Filter by source (optional)
+            metadata_filter: Filter by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are deleted.
+
+        Returns:
+            Number of documents deleted
+
+        Raises:
+            ValueError: If neither source nor metadata_filter is provided
+        """
+        return self.backend.delete_by_filter(source, metadata_filter)
+
+    def update_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict | None = None,
+        new_source: str | None = None,
+        new_metadata: dict | None = None,
+        metadata_merge: bool = False
+    ) -> int:
+        """Update documents matching the filter criteria.
+
+        Args:
+            source: Filter by source (optional)
+            metadata_filter: Filter by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are updated.
+            new_source: New source value to set (optional)
+            new_metadata: New metadata to set (optional)
+            metadata_merge: If True, merge with existing metadata; if False, replace
+
+        Returns:
+            Number of documents updated
+
+        Raises:
+            ValueError: If no filter or no update is provided
+        """
+        return self.backend.update_by_filter(
+            source, metadata_filter, new_source, new_metadata, metadata_merge
+        )
 
     def get_embedding_stats(self) -> dict:
         """Get statistics about embeddings."""

@@ -410,6 +410,125 @@ class SQLiteBackend(BaseBackend):
         return result["id"] if result else None
 
     # -------------------------------------------------------------------------
+    # Bulk Operations
+    # -------------------------------------------------------------------------
+
+    def delete_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None
+    ) -> int:
+        """Delete documents matching the filter criteria."""
+        if source is None and metadata_filter is None:
+            raise ValueError("At least one filter (source or metadata_filter) must be provided")
+
+        query = "DELETE FROM docs WHERE 1=1"
+        params = []
+
+        if source is not None:
+            query += " AND source = ?"
+            params.append(source)
+
+        if metadata_filter:
+            for key, value in metadata_filter.items():
+                query += " AND json_extract(metadata, ?) = ?"
+                params.append(f"$.{key}")
+                params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+        cursor = self.db.execute(query, params)
+        deleted = cursor.rowcount
+        self.db.commit()
+        return deleted
+
+    def update_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        new_source: str | None = None,
+        new_metadata: dict[str, Any] | None = None,
+        metadata_merge: bool = False
+    ) -> int:
+        """Update documents matching the filter criteria."""
+        if source is None and metadata_filter is None:
+            raise ValueError("At least one filter (source or metadata_filter) must be provided")
+
+        if new_source is None and new_metadata is None:
+            raise ValueError("At least one update (new_source or new_metadata) must be provided")
+
+        # For metadata merge, we need to handle it row by row in SQLite
+        if metadata_merge and new_metadata:
+            # Get matching doc IDs first
+            select_query = "SELECT id, metadata FROM docs WHERE 1=1"
+            params = []
+
+            if source is not None:
+                select_query += " AND source = ?"
+                params.append(source)
+
+            if metadata_filter:
+                for key, value in metadata_filter.items():
+                    select_query += " AND json_extract(metadata, ?) = ?"
+                    params.append(f"$.{key}")
+                    params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+            rows = self.db.execute(select_query, params).fetchall()
+            updated = 0
+
+            for row in rows:
+                existing_metadata = {}
+                if row["metadata"]:
+                    try:
+                        existing_metadata = json.loads(row["metadata"])
+                    except json.JSONDecodeError:
+                        pass
+
+                merged_metadata = {**existing_metadata, **new_metadata}
+                update_params = [json.dumps(merged_metadata)]
+
+                update_query = "UPDATE docs SET metadata = ?"
+                if new_source is not None:
+                    update_query += ", source = ?"
+                    update_params.append(new_source)
+
+                update_query += " WHERE id = ?"
+                update_params.append(row["id"])
+
+                self.db.execute(update_query, update_params)
+                updated += 1
+
+            self.db.commit()
+            return updated
+
+        # Simple update without merge
+        updates = []
+        update_params = []
+
+        if new_source is not None:
+            updates.append("source = ?")
+            update_params.append(new_source)
+
+        if new_metadata is not None:
+            updates.append("metadata = ?")
+            update_params.append(json.dumps(new_metadata))
+
+        query = f"UPDATE docs SET {', '.join(updates)} WHERE 1=1"
+
+        if source is not None:
+            query += " AND source = ?"
+            update_params.append(source)
+
+        if metadata_filter:
+            for key, value in metadata_filter.items():
+                query += " AND json_extract(metadata, ?) = ?"
+                update_params.append(f"$.{key}")
+                update_params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+        cursor = self.db.execute(query, update_params)
+        updated = cursor.rowcount
+        self.db.commit()
+        return updated
+
+    # -------------------------------------------------------------------------
     # Transaction Support
     # -------------------------------------------------------------------------
 

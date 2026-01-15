@@ -14,6 +14,10 @@ A local-first knowledge base with semantic (vector) and keyword search, exposed 
 - **Document expiration**: TTL support with automatic cleanup on startup
 - **Deduplication**: Detect and prevent duplicate content
 - **Update & append**: Modify existing documents with automatic re-embedding
+- **Bulk operations**: Update or delete documents by source/metadata filter
+- **Metadata merge**: Merge new metadata with existing instead of replacing
+- **Search filtering**: Filter search results by metadata
+- **Batch embedding**: Efficient batch processing for multiple documents
 
 ## Installation
 
@@ -74,28 +78,48 @@ Add to `~/.claude/claude_code_config.json`:
 
 ## Available Tools
 
+### Search
 | Tool | Description |
 |------|-------------|
-| `search(query, mode, limit)` | Search with mode: "semantic", "keyword", or "hybrid" |
+| `search(query, mode, limit, metadata_filter)` | Search with mode: "semantic", "keyword", or "hybrid". Filter by metadata. |
+
+### Document CRUD
+| Tool | Description |
+|------|-------------|
 | `add_document(content, source, metadata, expires_at, check_duplicate)` | Add a document with optional metadata and expiration |
-| `add_documents(documents, check_duplicate)` | Batch add multiple documents |
-| `update_document(doc_id, content, source, metadata, expires_at)` | Update an existing document |
+| `add_documents(documents, check_duplicate)` | Batch add with efficient batch embedding |
+| `get_document(doc_id)` | Retrieve a document by ID |
+| `update_document(doc_id, content, source, metadata, expires_at, metadata_merge)` | Update document, optionally merge metadata |
 | `append_to_document(doc_id, content, separator)` | Append content to an existing document |
 | `delete_document(doc_id)` | Remove a document by ID |
-| `get_document(doc_id)` | Retrieve a document by ID |
+
+### Bulk Operations
+| Tool | Description |
+|------|-------------|
+| `delete_by_filter(source, metadata_filter)` | Delete all documents matching filter |
+| `update_by_filter(source, metadata_filter, new_source, new_metadata, metadata_merge)` | Update all documents matching filter |
+
+### Document Management
+| Tool | Description |
+|------|-------------|
 | `list_documents(source, metadata_filter, limit, offset)` | List/filter documents with pagination |
 | `find_duplicate(content)` | Check if content already exists |
 | `cleanup_expired()` | Manually trigger expiration cleanup |
+| `ingest_file(file_path, chunk_size, overlap)` | Ingest a text file, splitting into chunks |
+
+### System
+| Tool | Description |
+|------|-------------|
 | `stats()` | Get KB statistics (doc count, backend type, current model) |
 | `reembed(target_model)` | Re-embed all documents with a different model |
-| `ingest_file(file_path, chunk_size, overlap)` | Ingest a text file, splitting into chunks |
 | `list_backends()` | List available backends and current backend |
 
 ## Usage Examples
 
 ```python
-# Search
+# Search with metadata filter
 search("how to configure webpack", mode="hybrid", limit=5)
+search("python", metadata_filter={"topic": "programming"})  # Filter by metadata
 
 # Add documents with metadata and expiration
 add_document(
@@ -105,14 +129,35 @@ add_document(
     expires_at="2025-12-31T23:59:59"
 )
 
+# Batch add (uses efficient batch embedding)
+add_documents([
+    {"content": "Doc 1", "source": "batch", "metadata": {"batch": True}},
+    {"content": "Doc 2", "source": "batch", "metadata": {"batch": True}},
+])
+
 # Add with deduplication check
 add_document("Same content", source="notes", check_duplicate=True)
 
-# Update a document
-update_document(doc_id=1, content="Updated content", metadata={"reviewed": True})
+# Update a document with metadata merge
+update_document(doc_id=1, metadata={"reviewed": True}, metadata_merge=True)  # Preserves existing metadata
 
 # Append to existing document
 append_to_document(doc_id=1, content="Additional notes...")
+
+# Bulk delete by filter
+delete_by_filter(source="old_source")  # Delete all docs from this source
+delete_by_filter(metadata_filter={"deprecated": True})  # Delete by metadata
+
+# Bulk update by filter
+update_by_filter(
+    source="old_source",
+    new_source="new_source"
+)
+update_by_filter(
+    metadata_filter={"project": "alpha"},
+    new_metadata={"status": "archived"},
+    metadata_merge=True  # Merge instead of replace
+)
 
 # List documents with filters
 list_documents(source="meetings", metadata_filter={"project": "alpha"}, limit=10)
@@ -165,12 +210,29 @@ kb.add(
     check_duplicate=True  # Returns existing ID if content exists
 )
 
-# Update and append
-kb.update(doc_id=1, content="New content", metadata={"reviewed": True})
+# Batch add (efficient batch embedding)
+kb.add_batch([
+    {"content": "Doc 1", "source": "batch"},
+    {"content": "Doc 2", "source": "batch"},
+])
+
+# Update with metadata merge
+kb.update(doc_id=1, metadata={"reviewed": True}, metadata_merge=True)
+
+# Append to document
 kb.append(doc_id=1, content="More content", separator="\n\n")
 
-# Search
+# Search with metadata filter
 results = kb.search_hybrid("query", limit=5)
+results = kb.search_semantic("query", metadata_filter={"project": "demo"})
+
+# Bulk operations
+kb.delete_by_filter(source="old_source")
+kb.update_by_filter(
+    metadata_filter={"project": "alpha"},
+    new_metadata={"status": "archived"},
+    metadata_merge=True
+)
 
 # List and filter documents
 docs = kb.list_documents(

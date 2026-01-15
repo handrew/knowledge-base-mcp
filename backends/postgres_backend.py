@@ -510,6 +510,92 @@ class PostgresBackend(BaseBackend):
         return result[0] if result else None
 
     # -------------------------------------------------------------------------
+    # Bulk Operations
+    # -------------------------------------------------------------------------
+
+    def delete_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None
+    ) -> int:
+        """Delete documents matching the filter criteria."""
+        if source is None and metadata_filter is None:
+            raise ValueError("At least one filter (source or metadata_filter) must be provided")
+
+        query = f"DELETE FROM {self._table_docs} WHERE 1=1"
+        params = []
+
+        if source is not None:
+            query += " AND source = %s"
+            params.append(source)
+
+        if metadata_filter:
+            query += " AND metadata @> %s"
+            params.append(json.dumps(metadata_filter))
+
+        with self.conn.cursor() as cur:
+            cur.execute(query, params)
+            deleted = cur.rowcount
+
+        self.conn.commit()
+        return deleted
+
+    def update_by_filter(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        new_source: str | None = None,
+        new_metadata: dict[str, Any] | None = None,
+        metadata_merge: bool = False
+    ) -> int:
+        """Update documents matching the filter criteria."""
+        if source is None and metadata_filter is None:
+            raise ValueError("At least one filter (source or metadata_filter) must be provided")
+
+        if new_source is None and new_metadata is None:
+            raise ValueError("At least one update (new_source or new_metadata) must be provided")
+
+        # Build WHERE clause
+        where_parts = ["1=1"]
+        where_params = []
+
+        if source is not None:
+            where_parts.append("source = %s")
+            where_params.append(source)
+
+        if metadata_filter:
+            where_parts.append("metadata @> %s")
+            where_params.append(json.dumps(metadata_filter))
+
+        where_clause = " AND ".join(where_parts)
+
+        # Build SET clause
+        set_parts = []
+        set_params = []
+
+        if new_source is not None:
+            set_parts.append("source = %s")
+            set_params.append(new_source)
+
+        if new_metadata is not None:
+            if metadata_merge:
+                # PostgreSQL JSONB concatenation merges objects
+                set_parts.append("metadata = COALESCE(metadata, '{}'::jsonb) || %s")
+            else:
+                set_parts.append("metadata = %s")
+            set_params.append(json.dumps(new_metadata))
+
+        query = f"UPDATE {self._table_docs} SET {', '.join(set_parts)} WHERE {where_clause}"
+        params = set_params + where_params
+
+        with self.conn.cursor() as cur:
+            cur.execute(query, params)
+            updated = cur.rowcount
+
+        self.conn.commit()
+        return updated
+
+    # -------------------------------------------------------------------------
     # Transaction Support
     # -------------------------------------------------------------------------
 
