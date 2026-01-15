@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MCP Server for Local Knowledge Base
-Exposes semantic and keyword search via SQLite FTS5 + sqlite-vss
+Exposes semantic and keyword search via SQLite FTS5 + in-memory vector search
 """
 
 import os
@@ -108,12 +108,11 @@ def stats() -> dict:
     Get knowledge base statistics.
 
     Returns:
-        Stats including total documents, database path, and vector search status
+        Stats including total documents, database path, and current model
     """
     return {
         "total_documents": kb.count(),
         "database_path": DB_PATH,
-        "vector_search_enabled": kb.vec_available,
         "current_model": kb.model_name,
     }
 

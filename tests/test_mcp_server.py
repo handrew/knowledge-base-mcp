@@ -43,15 +43,8 @@ def mcp_tools(temp_db_path):
 
         import knowledge_base_mcp as server
 
-        # Create fresh KB with correct model dimensions
+        # Create fresh KB with correct model
         server.kb = kb_module.KnowledgeBase(temp_db_path, model_name=test_model)
-
-        # Ensure vec0 table has correct dimensions (drop and recreate if exists)
-        if server.kb.vec_available:
-            model_dim = kb_module.MODELS[test_model]["dim"]
-            server.kb.db.execute("DROP TABLE IF EXISTS docs_vec")
-            server.kb.db.execute(f"CREATE VIRTUAL TABLE docs_vec USING vec0(embedding float[{model_dim}])")
-            server.kb.db.commit()
 
         yield server
 
@@ -161,7 +154,6 @@ class TestMCPTools:
         assert "total_documents" in stats
         assert "database_path" in stats
         assert "current_model" in stats
-        assert "vector_search_enabled" in stats
 
     def test_add_documents_batch(self, mcp_tools):
         """Test add_documents tool for batch adding."""
@@ -197,8 +189,8 @@ class TestMCPIngestFile:
 class TestMigration:
     """Test database migration scenarios."""
 
-    def test_dimension_mismatch_triggers_rebuild(self, tmp_path):
-        """Test that changing models with different dimensions rebuilds the index."""
+    def test_model_switch_preserves_data(self, tmp_path):
+        """Test that switching models preserves document data."""
         import knowledge_base as kb_module
 
         db_path = str(tmp_path / "migration_test.db")
@@ -209,16 +201,17 @@ class TestMigration:
         assert kb1.count() == 1
         kb1.db.close()
 
-        # Reopen with 1024-dim model - should trigger rebuild
+        # Reopen with 1024-dim model
         kb2 = kb_module.KnowledgeBase(db_path, model_name="BAAI/bge-m3")
 
-        # The doc should still exist but vec index should be rebuilt (and empty since dims don't match)
+        # The doc should still exist
         assert kb2.count() == 1
 
-        # Semantic search should still work (falls back or uses rebuilt index)
+        # Semantic search works (uses stored embeddings, dimension mismatch is handled)
         results = kb2.search_semantic("migration", limit=5)
-        # Results may be empty since old embedding is wrong dimension
         assert isinstance(results, list)
+        # Results may be empty or have low scores since embeddings are different dimensions
+        # but it shouldn't crash
 
 
 if __name__ == "__main__":

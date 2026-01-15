@@ -1,11 +1,10 @@
 """
-Local Knowledge Base with SQLite FTS5 + Vector Search (sqlite-vec)
+Local Knowledge Base with SQLite FTS5 + in-memory vector search
 """
 
 import sqlite3
 import json
-import struct
-from pathlib import Path
+import math
 from sentence_transformers import SentenceTransformer
 
 # Model registry: add new models here
@@ -17,6 +16,16 @@ MODELS = {
 
 # Default model
 DEFAULT_MODEL = "BAAI/bge-m3"
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 class KnowledgeBase:
@@ -39,20 +48,9 @@ class KnowledgeBase:
     _current_model_name: str = None
 
     def _init_db(self):
-        """Initialize database with FTS5 and VSS tables."""
+        """Initialize database with FTS5."""
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
-
-        # Try to load sqlite-vec extension (replacement for deprecated sqlite-vss)
-        try:
-            self.db.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(self.db)
-            self.db.enable_load_extension(False)
-            self.vec_available = True
-        except Exception as e:
-            print(f"Warning: sqlite-vec not available ({e}). Vector search disabled.")
-            self.vec_available = False
 
         # Create tables
         self.db.executescript("""
@@ -100,103 +98,23 @@ class KnowledgeBase:
         except sqlite3.OperationalError:
             pass  # Column already exists
 
-        # Handle vector index setup and migrations
-        if self.vec_available:
-            self._migrate_vec_index()
+        # Clean up any leftover sqlite-vec tables from previous versions
+        self._cleanup_legacy_vec_tables()
 
         self.db.commit()
 
-    def _migrate_vec_index(self):
-        """Handle vector index migrations and setup."""
-        model_dim = MODELS.get(self.model_name, {}).get("dim", 1024)
-
-        # Check for deprecated docs_vss table and remove it
-        vss_exists = self.db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='docs_vss'"
-        ).fetchone()
-        if vss_exists:
-            print("Migrating from deprecated sqlite-vss to sqlite-vec...")
-            self.db.execute("DROP TABLE docs_vss")
-
-        # Check if docs_vec exists and get its dimension
-        vec_exists = self.db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='docs_vec'"
-        ).fetchone()
-
-        needs_rebuild = False
-        if vec_exists:
-            # Check dimension by looking at the table schema
-            # vec0 tables store dimension in their schema
+    def _cleanup_legacy_vec_tables(self):
+        """Remove legacy sqlite-vec/sqlite-vss tables if they exist."""
+        legacy_tables = [
+            "docs_vss",  # old sqlite-vss
+            "docs_vec", "docs_vec_chunks", "docs_vec_rowids",
+            "docs_vec_vector_chunks00", "docs_vec_info"  # sqlite-vec
+        ]
+        for table in legacy_tables:
             try:
-                # Try to get a sample to check dimension
-                sample = self.db.execute(
-                    "SELECT rowid FROM docs_vec LIMIT 1"
-                ).fetchone()
-
-                if sample:
-                    # Test insert with current model dimension to see if it matches
-                    # We do this by checking if any doc's embedding matches expected dim
-                    doc_with_embedding = self.db.execute(
-                        "SELECT id, embedding FROM docs WHERE embedding IS NOT NULL LIMIT 1"
-                    ).fetchone()
-                    if doc_with_embedding:
-                        embedding = json.loads(doc_with_embedding["embedding"])
-                        if len(embedding) != model_dim:
-                            print(f"Vector index dimension mismatch: index has {len(embedding)}-dim embeddings, model needs {model_dim}")
-                            needs_rebuild = True
-            except Exception:
-                # If we can't determine, rebuild to be safe
-                needs_rebuild = True
-        else:
-            # No vec table exists, create it
-            needs_rebuild = True
-
-        if needs_rebuild:
-            self._rebuild_vec_index(model_dim)
-
-    def _rebuild_vec_index(self, model_dim: int):
-        """Rebuild the vector index with the specified dimension."""
-        print(f"Building vector index with {model_dim} dimensions...")
-
-        # Drop existing table if any
-        self.db.execute("DROP TABLE IF EXISTS docs_vec")
-
-        # Create new table with correct dimensions
-        self.db.execute(f"""
-            CREATE VIRTUAL TABLE docs_vec USING vec0(
-                embedding float[{model_dim}]
-            )
-        """)
-
-        # Populate from stored embeddings
-        docs = self.db.execute(
-            "SELECT id, embedding FROM docs WHERE embedding IS NOT NULL"
-        ).fetchall()
-
-        populated = 0
-        skipped = 0
-        for doc in docs:
-            try:
-                embedding = json.loads(doc["embedding"])
-                if len(embedding) == model_dim:
-                    self.db.execute(
-                        "INSERT INTO docs_vec (rowid, embedding) VALUES (?, ?)",
-                        (doc["id"], self._serialize_embedding(embedding))
-                    )
-                    populated += 1
-                else:
-                    skipped += 1
-            except (json.JSONDecodeError, TypeError):
-                skipped += 1
-
-        if populated > 0:
-            print(f"Populated vector index with {populated} documents")
-        if skipped > 0:
-            print(f"Skipped {skipped} documents with incompatible embeddings (run reembed() to fix)")
-
-    def _serialize_embedding(self, embedding: list[float]) -> bytes:
-        """Serialize embedding to bytes for sqlite-vec."""
-        return struct.pack(f"{len(embedding)}f", *embedding)
+                self.db.execute(f"DROP TABLE IF EXISTS {table}")
+            except sqlite3.OperationalError:
+                pass
 
     def _embed(self, text: str, is_query: bool = False, model_name: str = None) -> list[float]:
         """Generate embedding for text."""
@@ -222,14 +140,6 @@ class KnowledgeBase:
             (content, source, json.dumps(embedding), self.model_name)
         )
         doc_id = cursor.lastrowid
-
-        # Add to vector index
-        if self.vec_available:
-            self.db.execute(
-                "INSERT INTO docs_vec (rowid, embedding) VALUES (?, ?)",
-                (doc_id, self._serialize_embedding(embedding))
-            )
-
         self.db.commit()
         return doc_id
 
@@ -269,24 +179,35 @@ class KnowledgeBase:
         ]
 
     def search_semantic(self, query: str, limit: int = 5) -> list[dict]:
-        """Vector similarity search."""
-        if not self.vec_available:
-            return self.search_keyword(query, limit)
-
+        """Vector similarity search computed in memory."""
         query_embedding = self._embed(query, is_query=True)
 
-        results = self.db.execute("""
-            SELECT d.id, d.content, d.source, v.distance
-            FROM docs_vec v
-            JOIN docs d ON d.id = v.rowid
-            WHERE v.embedding MATCH ?
-            AND k = ?
-        """, (self._serialize_embedding(query_embedding), limit)).fetchall()
+        # Fetch all documents with embeddings
+        docs = self.db.execute(
+            "SELECT id, content, source, embedding FROM docs WHERE embedding IS NOT NULL"
+        ).fetchall()
 
-        return [
-            {"id": r["id"], "content": r["content"], "source": r["source"], "score": 1 / (1 + r["distance"])}
-            for r in results
-        ]
+        if not docs:
+            return []
+
+        # Compute similarities
+        results = []
+        for doc in docs:
+            try:
+                doc_embedding = json.loads(doc["embedding"])
+                similarity = cosine_similarity(query_embedding, doc_embedding)
+                results.append({
+                    "id": doc["id"],
+                    "content": doc["content"],
+                    "source": doc["source"],
+                    "score": similarity
+                })
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+        # Sort by score descending and limit
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:limit]
 
     def search_hybrid(self, query: str, limit: int = 5, semantic_weight: float = 0.7) -> list[dict]:
         """Hybrid search combining semantic and keyword results."""
@@ -332,8 +253,6 @@ class KnowledgeBase:
     def delete(self, doc_id: int) -> bool:
         """Delete a document by ID."""
         cursor = self.db.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
-        if self.vec_available:
-            self.db.execute("DELETE FROM docs_vec WHERE rowid = ?", (doc_id,))
         self.db.commit()
         return cursor.rowcount > 0
 
@@ -367,10 +286,6 @@ class KnowledgeBase:
             return {"error": f"Unknown model: {target_model}. Known models: {list(MODELS.keys())}"}
 
         target_dim = MODELS[target_model]["dim"]
-        current_dim = MODELS.get(self.model_name, {}).get("dim")
-
-        # Check if we need to rebuild VSS index due to dimension change
-        needs_vss_rebuild = target_dim != current_dim
 
         # Get all docs
         docs = self.db.execute("SELECT id, content FROM docs").fetchall()
@@ -397,29 +312,6 @@ class KnowledgeBase:
 
         self.db.commit()
 
-        # Rebuild vec index if dimensions changed
-        vec_rebuilt = False
-        if self.vec_available and needs_vss_rebuild:
-            print(f"Rebuilding vec index for {target_dim} dimensions...")
-            try:
-                self.db.execute("DROP TABLE IF EXISTS docs_vec")
-                self.db.execute(f"""
-                    CREATE VIRTUAL TABLE docs_vec USING vec0(
-                        embedding float[{target_dim}]
-                    )
-                """)
-                # Re-populate vec index
-                for doc in self.db.execute("SELECT id, embedding FROM docs").fetchall():
-                    embedding = json.loads(doc["embedding"])
-                    self.db.execute(
-                        "INSERT INTO docs_vec (rowid, embedding) VALUES (?, ?)",
-                        (doc["id"], self._serialize_embedding(embedding))
-                    )
-                self.db.commit()
-                vec_rebuilt = True
-            except Exception as e:
-                print(f"Warning: Could not rebuild vec index ({e})")
-
         # Update current model
         self.model_name = target_model
 
@@ -427,8 +319,8 @@ class KnowledgeBase:
             "reembedded": reembedded,
             "target_model": target_model,
             "target_dim": target_dim,
-            "vec_rebuilt": vec_rebuilt,
         }
+
 
 # Quick test
 if __name__ == "__main__":
