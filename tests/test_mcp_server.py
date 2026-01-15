@@ -1,6 +1,6 @@
 """
 Tests for the MCP server.
-Run with: pytest test_mcp_server.py -v
+Run with: pytest tests/test_mcp_server.py -v
 
 Tests the MCP tools directly without spinning up a full server.
 """
@@ -36,7 +36,7 @@ def mcp_tools(temp_db_path):
     original_model = kb_module.DEFAULT_MODEL
     kb_module.DEFAULT_MODEL = test_model
 
-    with patch.dict(os.environ, {"KB_DB_PATH": temp_db_path}):
+    with patch.dict(os.environ, {"KB_DB_PATH": temp_db_path, "KB_BACKEND": "sqlite"}):
         # Force reimport with new env
         if "knowledge_base_mcp" in sys.modules:
             del sys.modules["knowledge_base_mcp"]
@@ -44,7 +44,9 @@ def mcp_tools(temp_db_path):
         import knowledge_base_mcp as server
 
         # Create fresh KB with correct model
-        server.kb = kb_module.KnowledgeBase(temp_db_path, model_name=test_model)
+        from backends import BackendConfig
+        config = BackendConfig(backend_type="sqlite", connection_string=temp_db_path)
+        server.kb = kb_module.KnowledgeBase(backend_config=config, model_name=test_model)
 
         yield server
 
@@ -152,8 +154,10 @@ class TestMCPTools:
         """Test stats tool."""
         stats = mcp_tools.stats()
         assert "total_documents" in stats
-        assert "database_path" in stats
+        assert "backend_type" in stats
+        assert "connection_info" in stats
         assert "current_model" in stats
+        assert stats["backend_type"] == "sqlite"
 
     def test_add_documents_batch(self, mcp_tools):
         """Test add_documents tool for batch adding."""
@@ -164,6 +168,17 @@ class TestMCPTools:
         result = mcp_tools.add_documents(docs)
         assert result["added"] == 2
         assert len(result["ids"]) == 2
+
+    def test_list_backends(self, mcp_tools):
+        """Test list_backends tool."""
+        result = mcp_tools.list_backends()
+        assert "backends" in result
+        assert "current_backend" in result
+        assert result["current_backend"] == "sqlite"
+
+        # Should have at least SQLite
+        backend_names = [b["name"] for b in result["backends"]]
+        assert "sqlite" in backend_names
 
 
 class TestMCPIngestFile:
@@ -192,17 +207,19 @@ class TestMigration:
     def test_model_switch_preserves_data(self, tmp_path):
         """Test that switching models preserves document data."""
         import knowledge_base as kb_module
+        from backends import BackendConfig
 
         db_path = str(tmp_path / "migration_test.db")
 
         # Create KB with 768-dim model and add a doc
-        kb1 = kb_module.KnowledgeBase(db_path, model_name="BAAI/bge-base-en-v1.5")
+        config = BackendConfig(backend_type="sqlite", connection_string=db_path)
+        kb1 = kb_module.KnowledgeBase(backend_config=config, model_name="BAAI/bge-base-en-v1.5")
         kb1.add("Test document for migration", "test")
         assert kb1.count() == 1
-        kb1.db.close()
+        kb1.close()
 
         # Reopen with 1024-dim model
-        kb2 = kb_module.KnowledgeBase(db_path, model_name="BAAI/bge-m3")
+        kb2 = kb_module.KnowledgeBase(backend_config=config, model_name="BAAI/bge-m3")
 
         # The doc should still exist
         assert kb2.count() == 1
@@ -212,6 +229,8 @@ class TestMigration:
         assert isinstance(results, list)
         # Results may be empty or have low scores since embeddings are different dimensions
         # but it shouldn't crash
+
+        kb2.close()
 
 
 if __name__ == "__main__":

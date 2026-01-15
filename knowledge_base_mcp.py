@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MCP Server for Local Knowledge Base
-Exposes semantic and keyword search via SQLite FTS5 + in-memory vector search
+Exposes semantic and keyword search via pluggable backends (SQLite, PostgreSQL)
 """
 
 import os
@@ -9,16 +9,43 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from knowledge_base import KnowledgeBase
+from backends import BackendConfig, get_available_backends
 
-# Configuration
+# Configuration via environment variables
+# For SQLite (default):
+#   KB_DB_PATH=/path/to/kb.db
+# For PostgreSQL:
+#   KB_BACKEND=postgres
+#   KB_DB_URL=postgresql://user:pass@host:port/database
+#   KB_SCHEMA=public (optional)
+
+BACKEND_TYPE = os.environ.get("KB_BACKEND", "sqlite").lower()
+DB_URL = os.environ.get("KB_DB_URL", "")
 DB_PATH = os.environ.get("KB_DB_PATH", str(Path.home() / ".local" / "share" / "knowledge-base" / "kb.db"))
+SCHEMA = os.environ.get("KB_SCHEMA", "public")
 
-# Ensure directory exists
-Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+# Determine connection string based on backend
+if BACKEND_TYPE == "postgres" or BACKEND_TYPE == "postgresql":
+    if not DB_URL:
+        raise ValueError("KB_DB_URL environment variable is required for PostgreSQL backend")
+    connection_string = DB_URL
+    backend_config = BackendConfig(
+        backend_type="postgres",
+        connection_string=connection_string,
+        options={"schema": SCHEMA}
+    )
+else:
+    # SQLite - ensure directory exists
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    connection_string = DB_PATH
+    backend_config = BackendConfig(
+        backend_type="sqlite",
+        connection_string=connection_string,
+    )
 
 # Initialize
 mcp = FastMCP("knowledge-base")
-kb = KnowledgeBase(DB_PATH)
+kb = KnowledgeBase(backend_config=backend_config)
 
 
 @mcp.tool()
@@ -28,7 +55,7 @@ def search(query: str, mode: str = "hybrid", limit: int = 5) -> list[dict]:
 
     Args:
         query: The search query
-        mode: Search mode - "semantic" (vector similarity), "keyword" (FTS5), or "hybrid" (both)
+        mode: Search mode - "semantic" (vector similarity), "keyword" (FTS), or "hybrid" (both)
         limit: Maximum results to return (default: 5)
 
     Returns:
@@ -108,11 +135,12 @@ def stats() -> dict:
     Get knowledge base statistics.
 
     Returns:
-        Stats including total documents, database path, and current model
+        Stats including total documents, backend type, connection info, and current model
     """
     return {
         "total_documents": kb.count(),
-        "database_path": DB_PATH,
+        "backend_type": kb.backend_type,
+        "connection_info": kb.db_path,
         "current_model": kb.model_name,
     }
 
@@ -189,6 +217,20 @@ def ingest_file(file_path: str, chunk_size: int = 1000, overlap: int = 200) -> d
         "chunks_created": len(chunks),
         "ids": ids,
         "source": source
+    }
+
+
+@mcp.tool()
+def list_backends() -> dict:
+    """
+    List available database backends.
+
+    Returns:
+        List of backends with name, description, and availability status
+    """
+    return {
+        "backends": get_available_backends(),
+        "current_backend": kb.backend_type,
     }
 
 

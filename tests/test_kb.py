@@ -1,9 +1,9 @@
 """
 Tests for the Knowledge Base module.
-Run with: pytest test_kb.py -v
+Run with: pytest tests/test_kb.py -v
 
 For faster tests, use the smaller model:
-    pytest test_kb.py -v --fast
+    pytest tests/test_kb.py -v --fast
 """
 
 import os
@@ -13,6 +13,7 @@ from pathlib import Path
 
 import knowledge_base as kb_module
 from knowledge_base import KnowledgeBase, MODELS
+from backends import BackendConfig
 
 # Use smaller/faster model for tests
 TEST_MODEL = "BAAI/bge-base-en-v1.5"  # 768 dim, much smaller than bge-m3
@@ -50,7 +51,9 @@ def temp_db():
 @pytest.fixture
 def kb(temp_db, use_fast_model):
     """Create a KnowledgeBase instance with temp database."""
-    return KnowledgeBase(temp_db, model_name=use_fast_model)
+    kb = KnowledgeBase(temp_db, model_name=use_fast_model)
+    yield kb
+    kb.close()
 
 
 class TestBasicOperations:
@@ -139,8 +142,6 @@ class TestSearch:
         """Test vector similarity search."""
         # Search for something semantically related to databases
         results = kb_with_docs.search_semantic("storing and querying data", limit=3)
-        # Note: If sqlite-vss is not available, semantic search falls back to keyword
-        # which may return 0 results for this query. That's OK - we're testing the API works.
         assert isinstance(results, list)
         if len(results) > 0:
             # Results should have scores
@@ -283,6 +284,42 @@ class TestEdgeCases:
         # Should not crash with special characters
         results = kb.search_keyword("quotes", limit=5)
         assert len(results) >= 0  # May or may not find results, but shouldn't crash
+
+
+class TestBackendType:
+    """Test backend type detection and properties."""
+
+    def test_sqlite_backend_type(self, kb):
+        """Test that SQLite backend is used by default."""
+        assert kb.backend_type == "sqlite"
+
+    def test_db_path_property(self, kb, temp_db):
+        """Test db_path property returns connection info."""
+        assert kb.db_path == temp_db
+
+    def test_explicit_backend_config(self, temp_db, use_fast_model):
+        """Test using explicit backend configuration."""
+        config = BackendConfig(
+            backend_type="sqlite",
+            connection_string=temp_db
+        )
+        kb = KnowledgeBase(backend_config=config, model_name=use_fast_model)
+        assert kb.backend_type == "sqlite"
+        kb.add("Test", "test")
+        assert kb.count() == 1
+        kb.close()
+
+
+class TestClose:
+    """Test resource cleanup."""
+
+    def test_close(self, temp_db, use_fast_model):
+        """Test closing the knowledge base."""
+        kb = KnowledgeBase(temp_db, model_name=use_fast_model)
+        kb.add("Test", "test")
+        kb.close()
+        # After close, operations should fail or be undefined
+        # We mainly want to ensure close() doesn't crash
 
 
 if __name__ == "__main__":

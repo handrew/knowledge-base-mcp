@@ -1,11 +1,16 @@
 """
-Local Knowledge Base with SQLite FTS5 + in-memory vector search
+Local Knowledge Base with pluggable backend support.
+
+Supports SQLite (default) and PostgreSQL backends with:
+- Full-text keyword search
+- Semantic search via embeddings
+- Hybrid search combining both approaches
 """
 
-import sqlite3
-import json
 import math
 from sentence_transformers import SentenceTransformer
+
+from backends import BaseBackend, BackendConfig, create_backend, create_backend_from_url
 
 # Model registry: add new models here
 MODELS = {
@@ -29,11 +34,51 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 class KnowledgeBase:
-    def __init__(self, db_path: str = "knowledge_base.db", model_name: str = DEFAULT_MODEL):
-        self.db_path = db_path
+    """Knowledge base with pluggable backend support.
+
+    Supports multiple backends (SQLite, PostgreSQL) with a unified interface
+    for document storage, full-text search, and semantic search.
+
+    Example usage:
+        # SQLite (default)
+        kb = KnowledgeBase("knowledge_base.db")
+
+        # PostgreSQL
+        kb = KnowledgeBase("postgresql://user:pass@localhost/kb")
+
+        # Explicit backend configuration
+        from backends import BackendConfig
+        config = BackendConfig(
+            backend_type="postgres",
+            connection_string="postgresql://localhost/kb",
+            options={"schema": "my_schema"}
+        )
+        kb = KnowledgeBase(backend_config=config)
+    """
+
+    def __init__(
+        self,
+        db_path: str = "knowledge_base.db",
+        model_name: str = DEFAULT_MODEL,
+        backend_config: BackendConfig | None = None
+    ):
+        """Initialize the knowledge base.
+
+        Args:
+            db_path: Database path or connection URL. Used if backend_config is not provided.
+                     Supports: file paths (SQLite), postgresql:// URLs, sqlite:// URLs
+            model_name: Name of the embedding model to use
+            backend_config: Explicit backend configuration (overrides db_path if provided)
+        """
         self.model_name = model_name
         self.model = None
-        self._init_db()
+        self._current_model_name: str = None
+
+        # Initialize backend
+        if backend_config:
+            self.backend = create_backend(backend_config)
+        else:
+            self.backend = create_backend_from_url(db_path)
 
     def _load_model(self, model_name: str = None):
         """Lazy load an embedding model."""
@@ -44,77 +89,6 @@ class KnowledgeBase:
             self.model = SentenceTransformer(model_name, trust_remote_code=trust_remote)
             self._current_model_name = model_name
         return self.model
-
-    _current_model_name: str = None
-
-    def _init_db(self):
-        """Initialize database with FTS5."""
-        self.db = sqlite3.connect(self.db_path)
-        self.db.row_factory = sqlite3.Row
-
-        # Create tables
-        self.db.executescript("""
-            -- Main documents table
-            CREATE TABLE IF NOT EXISTS docs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                source TEXT DEFAULT 'unknown',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                embedding TEXT,
-                embedding_model TEXT
-            );
-
-            -- Full-text search index
-            CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
-                content,
-                source,
-                content='docs',
-                content_rowid='id',
-                tokenize='porter unicode61'
-            );
-
-            -- Triggers to keep FTS in sync
-            CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON docs BEGIN
-                INSERT INTO docs_fts(rowid, content, source)
-                VALUES (new.id, new.content, new.source);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS docs_ad AFTER DELETE ON docs BEGIN
-                INSERT INTO docs_fts(docs_fts, rowid, content, source)
-                VALUES ('delete', old.id, old.content, old.source);
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS docs_au AFTER UPDATE ON docs BEGIN
-                INSERT INTO docs_fts(docs_fts, rowid, content, source)
-                VALUES ('delete', old.id, old.content, old.source);
-                INSERT INTO docs_fts(rowid, content, source)
-                VALUES (new.id, new.content, new.source);
-            END;
-        """)
-
-        # Migration: add embedding_model column if missing
-        try:
-            self.db.execute("ALTER TABLE docs ADD COLUMN embedding_model TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-
-        # Clean up any leftover sqlite-vec tables from previous versions
-        self._cleanup_legacy_vec_tables()
-
-        self.db.commit()
-
-    def _cleanup_legacy_vec_tables(self):
-        """Remove legacy sqlite-vec/sqlite-vss tables if they exist."""
-        legacy_tables = [
-            "docs_vss",  # old sqlite-vss
-            "docs_vec", "docs_vec_chunks", "docs_vec_rowids",
-            "docs_vec_vector_chunks00", "docs_vec_info"  # sqlite-vec
-        ]
-        for table in legacy_tables:
-            try:
-                self.db.execute(f"DROP TABLE IF EXISTS {table}")
-            except sqlite3.OperationalError:
-                pass
 
     def _embed(self, text: str, is_query: bool = False, model_name: str = None) -> list[float]:
         """Generate embedding for text."""
@@ -134,14 +108,7 @@ class KnowledgeBase:
     def add(self, content: str, source: str = "unknown") -> int:
         """Add a document to the knowledge base."""
         embedding = self._embed(content, is_query=False)
-
-        cursor = self.db.execute(
-            "INSERT INTO docs (content, source, embedding, embedding_model) VALUES (?, ?, ?, ?)",
-            (content, source, json.dumps(embedding), self.model_name)
-        )
-        doc_id = cursor.lastrowid
-        self.db.commit()
-        return doc_id
+        return self.backend.add(content, source, embedding, self.model_name)
 
     def add_batch(self, documents: list[dict]) -> list[int]:
         """Add multiple documents. Each dict should have 'content' and optionally 'source'."""
@@ -155,55 +122,30 @@ class KnowledgeBase:
         return ids
 
     def search_keyword(self, query: str, limit: int = 5) -> list[dict]:
-        """Full-text keyword search using FTS5."""
-        words = query.split()
-        if not words:
-            return []
-
-        # Escape special FTS5 characters in each word
-        safe_words = ['"' + word.replace('"', '""') + '"' for word in words]
-        fts_query = " OR ".join(safe_words)
-
-        results = self.db.execute("""
-            SELECT d.id, d.content, d.source, f.rank
-            FROM docs_fts f
-            JOIN docs d ON d.id = f.rowid
-            WHERE docs_fts MATCH ?
-            ORDER BY f.rank
-            LIMIT ?
-        """, (fts_query, limit)).fetchall()
-
-        return [
-            {"id": r["id"], "content": r["content"], "source": r["source"], "score": -r["rank"]}
-            for r in results
-        ]
+        """Full-text keyword search."""
+        results = self.backend.search_keyword(query, limit)
+        return [r.to_dict() for r in results]
 
     def search_semantic(self, query: str, limit: int = 5) -> list[dict]:
         """Vector similarity search computed in memory."""
         query_embedding = self._embed(query, is_query=True)
 
         # Fetch all documents with embeddings
-        docs = self.db.execute(
-            "SELECT id, content, source, embedding FROM docs WHERE embedding IS NOT NULL"
-        ).fetchall()
+        docs = self.backend.get_all_embeddings()
 
         if not docs:
             return []
 
         # Compute similarities
         results = []
-        for doc in docs:
-            try:
-                doc_embedding = json.loads(doc["embedding"])
-                similarity = cosine_similarity(query_embedding, doc_embedding)
-                results.append({
-                    "id": doc["id"],
-                    "content": doc["content"],
-                    "source": doc["source"],
-                    "score": similarity
-                })
-            except (json.JSONDecodeError, TypeError):
-                continue
+        for doc_id, content, source, embedding in docs:
+            similarity = cosine_similarity(query_embedding, embedding)
+            results.append({
+                "id": doc_id,
+                "content": content,
+                "source": source,
+                "score": similarity
+            })
 
         # Sort by score descending and limit
         results.sort(key=lambda x: x["score"], reverse=True)
@@ -252,23 +194,37 @@ class KnowledgeBase:
 
     def delete(self, doc_id: int) -> bool:
         """Delete a document by ID."""
-        cursor = self.db.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
-        self.db.commit()
-        return cursor.rowcount > 0
+        return self.backend.delete(doc_id)
 
     def count(self) -> int:
         """Get total document count."""
-        return self.db.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+        return self.backend.count()
 
     def get(self, doc_id: int) -> dict | None:
         """Get a document by ID."""
-        result = self.db.execute(
-            "SELECT id, content, source, created_at, embedding_model FROM docs WHERE id = ?",
-            (doc_id,)
-        ).fetchone()
-        if result:
-            return dict(result)
+        doc = self.backend.get(doc_id)
+        if doc:
+            return doc.to_dict()
         return None
+
+    def list_sources(self) -> list[dict]:
+        """List all sources with document counts."""
+        return self.backend.list_sources()
+
+    def get_embedding_stats(self) -> dict:
+        """Get statistics about embeddings."""
+        models = self.backend.get_embedding_stats()
+        return {
+            "current_model": self.model_name,
+            "models": models,
+        }
+
+    def list_available_models(self) -> list[dict]:
+        """List available embedding models."""
+        return [
+            {"name": name, "dim": info["dim"]}
+            for name, info in MODELS.items()
+        ]
 
     def reembed(self, target_model: str = None, batch_size: int = 100) -> dict:
         """
@@ -288,7 +244,7 @@ class KnowledgeBase:
         target_dim = MODELS[target_model]["dim"]
 
         # Get all docs
-        docs = self.db.execute("SELECT id, content FROM docs").fetchall()
+        docs = self.backend.get_all_documents()
         total = len(docs)
 
         if total == 0:
@@ -296,21 +252,16 @@ class KnowledgeBase:
 
         # Re-embed in batches
         reembedded = 0
-        for doc in docs:
-            doc_id, content = doc["id"], doc["content"]
+        for doc_id, content in docs:
             embedding = self._embed(content, is_query=False, model_name=target_model)
-
-            self.db.execute(
-                "UPDATE docs SET embedding = ?, embedding_model = ? WHERE id = ?",
-                (json.dumps(embedding), target_model, doc_id)
-            )
+            self.backend.update_embedding(doc_id, embedding, target_model)
             reembedded += 1
 
             if reembedded % batch_size == 0:
-                self.db.commit()
+                self.backend.commit()
                 print(f"Re-embedded {reembedded}/{total} documents...")
 
-        self.db.commit()
+        self.backend.commit()
 
         # Update current model
         self.model_name = target_model
@@ -320,6 +271,21 @@ class KnowledgeBase:
             "target_model": target_model,
             "target_dim": target_dim,
         }
+
+    def close(self) -> None:
+        """Close the backend connection."""
+        if self.backend:
+            self.backend.close()
+
+    @property
+    def db_path(self) -> str:
+        """Get the connection info (for backwards compatibility)."""
+        return self.backend.connection_info
+
+    @property
+    def backend_type(self) -> str:
+        """Get the backend type."""
+        return self.backend.backend_type
 
 
 # Quick test
@@ -331,6 +297,7 @@ if __name__ == "__main__":
     kb.add("SQLite is a lightweight database engine.", "test")
     kb.add("Vector search enables semantic similarity matching.", "test")
 
+    print(f"Backend: {kb.backend_type}")
     print(f"Total docs: {kb.count()}")
     print("\nSemantic search for 'database':")
     for r in kb.search_semantic("database", limit=2):
@@ -339,3 +306,5 @@ if __name__ == "__main__":
     print("\nKeyword search for 'programming':")
     for r in kb.search_keyword("programming", limit=2):
         print(f"  [{r['score']:.3f}] {r['content'][:50]}...")
+
+    kb.close()
