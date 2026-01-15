@@ -4,31 +4,18 @@ A local-first knowledge base with semantic (vector) and keyword (FTS5) search, e
 
 ## Features
 
-- **Semantic search**: Vector similarity using sentence-transformers (default: `BAAI/bge-m3`)
+- **Semantic search**: In-memory vector similarity using sentence-transformers (default: `BAAI/bge-m3`)
 - **Keyword search**: SQLite FTS5 with BM25 ranking
 - **Hybrid search**: Combines both for best results
 - **File ingestion**: Chunk and ingest text files
 - **Model portability**: Track which model embedded each document, re-embed when switching models
-- **Portable**: Single SQLite database file
+- **Portable**: Single SQLite database file (no native extensions required)
 
 ## Installation
 
 ```bash
 cd knowledge-base-mcp
 pip install -r requirements.txt
-```
-
-### Optional: sqlite-vss for vector search
-
-If `sqlite-vss` fails to install, the server will still work with keyword search only (semantic search falls back to keyword).
-
-```bash
-# macOS
-pip install sqlite-vss
-
-# If that fails:
-brew install sqlite
-pip install sqlite-vss --no-binary :all:
 ```
 
 ## Configuration for Claude Code
@@ -60,11 +47,9 @@ Default database path: `~/.local/share/knowledge-base/kb.db`
 | `add_documents(documents)` | Batch add multiple documents |
 | `delete_document(doc_id)` | Remove a document by ID |
 | `get_document(doc_id)` | Retrieve a document by ID |
-| `list_sources()` | Show all sources with document counts |
-| `stats()` | Get KB statistics (docs, sources, models used) |
-| `ingest_file(file_path)` | Import and chunk a text file |
-| `list_models()` | Show available embedding models |
+| `stats()` | Get KB statistics (doc count, db path, current model) |
 | `reembed(target_model)` | Re-embed all documents with a different model |
+| `ingest_file(file_path, chunk_size, overlap)` | Ingest a text file, splitting into chunks |
 
 ## Usage Examples
 
@@ -76,13 +61,12 @@ search("how to configure webpack", mode="hybrid", limit=5)
 add_document("Your text here...", source="notes")
 
 # Ingest a file
-ingest_file("~/notes/project.md")
+ingest_file("/path/to/document.txt", chunk_size=1000, overlap=200)
 
 # Check what's in the KB
 stats()
 
 # Switch embedding models
-list_models()
 reembed("BAAI/bge-base-en-v1.5")
 ```
 
@@ -101,5 +85,5 @@ Each document stores which model was used for its embedding. Use `reembed()` to 
 ## Running Tests
 
 ```bash
-pytest test_kb.py test_mcp_server.py -v
+pytest tests/ -v
 ```
