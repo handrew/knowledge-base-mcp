@@ -7,6 +7,7 @@ Requires psycopg2 (or psycopg2-binary) to be installed.
 
 import json
 import re
+from typing import Any
 from urllib.parse import urlparse, parse_qs
 
 from .base import BaseBackend, BackendConfig, Document, SearchResult
@@ -102,9 +103,22 @@ class PostgresBackend(BaseBackend):
                     embedding_model TEXT,
                     content_tsv TSVECTOR GENERATED ALWAYS AS (
                         to_tsvector('english', content)
-                    ) STORED
+                    ) STORED,
+                    metadata JSONB,
+                    expires_at TIMESTAMP
                 )
             """)
+
+            # Migrations for existing tables: add columns if missing
+            migrations = [
+                f"ALTER TABLE {self._table_docs} ADD COLUMN IF NOT EXISTS metadata JSONB",
+                f"ALTER TABLE {self._table_docs} ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP",
+            ]
+            for migration in migrations:
+                try:
+                    cur.execute(migration)
+                except Exception:
+                    pass  # Column already exists or other benign error
 
             # Create GIN index for full-text search
             cur.execute(f"""
@@ -124,7 +138,23 @@ class PostgresBackend(BaseBackend):
                 ON {self._table_docs} (embedding_model)
             """)
 
+            # Create GIN index on metadata for JSON filtering
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self.table_prefix}docs_metadata_idx
+                ON {self._table_docs} USING GIN (metadata)
+            """)
+
+            # Create index on expires_at for cleanup queries
+            cur.execute(f"""
+                CREATE INDEX IF NOT EXISTS {self.table_prefix}docs_expires_idx
+                ON {self._table_docs} (expires_at)
+                WHERE expires_at IS NOT NULL
+            """)
+
         self.conn.commit()
+
+        # Clean up expired documents on startup
+        self.cleanup_expired()
 
     def close(self) -> None:
         """Close the database connection."""
@@ -141,15 +171,19 @@ class PostgresBackend(BaseBackend):
         content: str,
         source: str,
         embedding: list[float] | None,
-        embedding_model: str | None
+        embedding_model: str | None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None
     ) -> int:
         """Add a document to the knowledge base."""
+        metadata_json = json.dumps(metadata) if metadata else None
+
         with self.conn.cursor() as cur:
             cur.execute(f"""
-                INSERT INTO {self._table_docs} (content, source, embedding, embedding_model)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO {self._table_docs} (content, source, embedding, embedding_model, metadata, expires_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING id
-            """, (content, source, embedding, embedding_model))
+            """, (content, source, embedding, embedding_model, metadata_json, expires_at))
             doc_id = cur.fetchone()[0]
 
         self.conn.commit()
@@ -181,19 +215,28 @@ class PostgresBackend(BaseBackend):
         """Retrieve a document by ID."""
         with self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute(f"""
-                SELECT id, content, source, created_at, embedding_model
+                SELECT id, content, source, created_at, embedding_model, metadata, expires_at
                 FROM {self._table_docs}
                 WHERE id = %s
             """, (doc_id,))
             result = cur.fetchone()
 
         if result:
+            metadata = result["metadata"]
+            # psycopg2 automatically deserializes JSONB to dict
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = None
             return Document(
                 id=result["id"],
                 content=result["content"],
                 source=result["source"],
                 created_at=str(result["created_at"]) if result["created_at"] else None,
                 embedding_model=result["embedding_model"],
+                metadata=metadata,
+                expires_at=str(result["expires_at"]) if result["expires_at"] else None,
             )
         return None
 
@@ -203,7 +246,9 @@ class PostgresBackend(BaseBackend):
         content: str | None = None,
         source: str | None = None,
         embedding: list[float] | None = None,
-        embedding_model: str | None = None
+        embedding_model: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None
     ) -> bool:
         """Update an existing document."""
         # Build dynamic UPDATE query based on provided fields
@@ -222,6 +267,12 @@ class PostgresBackend(BaseBackend):
         if embedding_model is not None:
             updates.append("embedding_model = %s")
             params.append(embedding_model)
+        if metadata is not None:
+            updates.append("metadata = %s")
+            params.append(json.dumps(metadata))
+        if expires_at is not None:
+            updates.append("expires_at = %s")
+            params.append(expires_at)
 
         if not updates:
             # Nothing to update, check if doc exists
@@ -374,6 +425,89 @@ class PostgresBackend(BaseBackend):
             results = cur.fetchall()
 
         return [{"model": r["model"], "count": r["count"]} for r in results]
+
+    # -------------------------------------------------------------------------
+    # Document Listing and Filtering
+    # -------------------------------------------------------------------------
+
+    def list_documents(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[Document]:
+        """List documents with optional filtering."""
+        query = f"""SELECT id, content, source, created_at, embedding_model, metadata, expires_at
+                    FROM {self._table_docs} WHERE 1=1"""
+        params = []
+
+        if source is not None:
+            query += " AND source = %s"
+            params.append(source)
+
+        # For metadata filtering in PostgreSQL, we use JSONB containment
+        if metadata_filter:
+            query += " AND metadata @> %s"
+            params.append(json.dumps(metadata_filter))
+
+        query += " ORDER BY id DESC LIMIT %s OFFSET %s"
+        params.extend([limit, offset])
+
+        with self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute(query, params)
+            results = cur.fetchall()
+
+        documents = []
+        for r in results:
+            metadata = r["metadata"]
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except json.JSONDecodeError:
+                    metadata = None
+            documents.append(Document(
+                id=r["id"],
+                content=r["content"],
+                source=r["source"],
+                created_at=str(r["created_at"]) if r["created_at"] else None,
+                embedding_model=r["embedding_model"],
+                metadata=metadata,
+                expires_at=str(r["expires_at"]) if r["expires_at"] else None,
+            ))
+        return documents
+
+    # -------------------------------------------------------------------------
+    # Expiration Management
+    # -------------------------------------------------------------------------
+
+    def cleanup_expired(self) -> int:
+        """Delete all documents that have expired (expires_at < now)."""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                DELETE FROM {self._table_docs}
+                WHERE expires_at IS NOT NULL AND expires_at < NOW()
+            """)
+            deleted = cur.rowcount
+
+        self.conn.commit()
+        return deleted
+
+    # -------------------------------------------------------------------------
+    # Deduplication
+    # -------------------------------------------------------------------------
+
+    def find_duplicate(self, content: str) -> int | None:
+        """Check if a document with the exact same content already exists."""
+        with self.conn.cursor() as cur:
+            cur.execute(f"""
+                SELECT id FROM {self._table_docs}
+                WHERE content = %s
+                LIMIT 1
+            """, (content,))
+            result = cur.fetchone()
+
+        return result[0] if result else None
 
     # -------------------------------------------------------------------------
     # Transaction Support

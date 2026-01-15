@@ -439,5 +439,142 @@ class TestClose:
         # We mainly want to ensure close() doesn't crash
 
 
+class TestMetadata:
+    """Test metadata functionality."""
+
+    def test_add_with_metadata(self, kb):
+        """Test adding a document with metadata."""
+        doc_id = kb.add("Test content", "test", metadata={"project": "foo", "private": True})
+        doc = kb.get(doc_id)
+        assert doc is not None
+        assert doc["metadata"] == {"project": "foo", "private": True}
+
+    def test_update_metadata(self, kb):
+        """Test updating document metadata."""
+        doc_id = kb.add("Test content", "test", metadata={"version": 1})
+        kb.update(doc_id, metadata={"version": 2, "status": "reviewed"})
+        doc = kb.get(doc_id)
+        assert doc["metadata"] == {"version": 2, "status": "reviewed"}
+
+    def test_list_documents_with_metadata_filter(self, kb):
+        """Test listing documents with metadata filter."""
+        kb.add("Doc 1", "test", metadata={"project": "alpha", "status": "active"})
+        kb.add("Doc 2", "test", metadata={"project": "beta", "status": "active"})
+        kb.add("Doc 3", "test", metadata={"project": "alpha", "status": "archived"})
+
+        # Filter by project
+        docs = kb.list_documents(metadata_filter={"project": "alpha"})
+        assert len(docs) == 2
+        assert all(d["metadata"]["project"] == "alpha" for d in docs)
+
+        # Filter by multiple fields
+        docs = kb.list_documents(metadata_filter={"project": "alpha", "status": "active"})
+        assert len(docs) == 1
+
+    def test_list_documents_with_source_filter(self, kb):
+        """Test listing documents with source filter."""
+        kb.add("Doc 1", "source_a")
+        kb.add("Doc 2", "source_a")
+        kb.add("Doc 3", "source_b")
+
+        docs = kb.list_documents(source="source_a")
+        assert len(docs) == 2
+        assert all(d["source"] == "source_a" for d in docs)
+
+    def test_list_documents_pagination(self, kb):
+        """Test pagination in list_documents."""
+        for i in range(5):
+            kb.add(f"Document {i}", "test")
+
+        # Get first 2
+        docs_page1 = kb.list_documents(limit=2, offset=0)
+        assert len(docs_page1) == 2
+
+        # Get next 2
+        docs_page2 = kb.list_documents(limit=2, offset=2)
+        assert len(docs_page2) == 2
+
+        # Should be different docs (ordered by id DESC)
+        page1_ids = {d["id"] for d in docs_page1}
+        page2_ids = {d["id"] for d in docs_page2}
+        assert page1_ids.isdisjoint(page2_ids)
+
+
+class TestExpiration:
+    """Test document expiration functionality."""
+
+    def test_add_with_expiration(self, kb):
+        """Test adding a document with expiration."""
+        doc_id = kb.add("Test content", "test", expires_at="2099-12-31T23:59:59")
+        doc = kb.get(doc_id)
+        assert doc is not None
+        assert doc["expires_at"] == "2099-12-31T23:59:59"
+
+    def test_cleanup_expired_removes_old_docs(self, kb):
+        """Test that cleanup_expired removes expired documents."""
+        # Add a document that already expired
+        doc_id = kb.add("Expired doc", "test", expires_at="2020-01-01T00:00:00")
+        assert kb.get(doc_id) is not None
+
+        # Run cleanup
+        deleted = kb.cleanup_expired()
+        assert deleted == 1
+        assert kb.get(doc_id) is None
+
+    def test_cleanup_expired_keeps_valid_docs(self, kb):
+        """Test that cleanup_expired keeps non-expired documents."""
+        # Add a document that expires in the future
+        doc_id = kb.add("Future doc", "test", expires_at="2099-12-31T23:59:59")
+
+        # Run cleanup
+        deleted = kb.cleanup_expired()
+        assert deleted == 0
+        assert kb.get(doc_id) is not None
+
+    def test_cleanup_expired_keeps_no_expiration_docs(self, kb):
+        """Test that documents without expiration are kept."""
+        doc_id = kb.add("No expiration", "test")
+
+        deleted = kb.cleanup_expired()
+        assert deleted == 0
+        assert kb.get(doc_id) is not None
+
+
+class TestDeduplication:
+    """Test deduplication functionality."""
+
+    def test_find_duplicate_exists(self, kb):
+        """Test finding an existing duplicate."""
+        doc_id = kb.add("Unique content here", "test")
+
+        found_id = kb.find_duplicate("Unique content here")
+        assert found_id == doc_id
+
+    def test_find_duplicate_not_exists(self, kb):
+        """Test finding no duplicate."""
+        kb.add("Some content", "test")
+
+        found_id = kb.find_duplicate("Different content")
+        assert found_id is None
+
+    def test_add_with_check_duplicate(self, kb):
+        """Test add with check_duplicate flag."""
+        doc_id1 = kb.add("Same content", "test1", check_duplicate=True)
+        doc_id2 = kb.add("Same content", "test2", check_duplicate=True)
+
+        # Should return the same ID since content is duplicate
+        assert doc_id1 == doc_id2
+        assert kb.count() == 1
+
+    def test_add_without_check_duplicate(self, kb):
+        """Test add without check_duplicate allows duplicates."""
+        doc_id1 = kb.add("Same content", "test1", check_duplicate=False)
+        doc_id2 = kb.add("Same content", "test2", check_duplicate=False)
+
+        # Should create two separate documents
+        assert doc_id1 != doc_id2
+        assert kb.count() == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

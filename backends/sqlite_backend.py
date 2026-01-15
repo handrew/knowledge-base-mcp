@@ -76,14 +76,23 @@ class SQLiteBackend(BaseBackend):
             END;
         """)
 
-        # Migration: add embedding_model column if missing
-        try:
-            self.db.execute("ALTER TABLE docs ADD COLUMN embedding_model TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Migrations: add columns if missing
+        migrations = [
+            "ALTER TABLE docs ADD COLUMN embedding_model TEXT",
+            "ALTER TABLE docs ADD COLUMN metadata TEXT",
+            "ALTER TABLE docs ADD COLUMN expires_at TIMESTAMP",
+        ]
+        for migration in migrations:
+            try:
+                self.db.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
         # Clean up any leftover sqlite-vec tables from previous versions
         self._cleanup_legacy_vec_tables()
+
+        # Clean up expired documents on startup
+        self.cleanup_expired()
 
         self.db.commit()
 
@@ -115,14 +124,18 @@ class SQLiteBackend(BaseBackend):
         content: str,
         source: str,
         embedding: list[float] | None,
-        embedding_model: str | None
+        embedding_model: str | None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None
     ) -> int:
         """Add a document to the knowledge base."""
         embedding_json = json.dumps(embedding) if embedding else None
+        metadata_json = json.dumps(metadata) if metadata else None
 
         cursor = self.db.execute(
-            "INSERT INTO docs (content, source, embedding, embedding_model) VALUES (?, ?, ?, ?)",
-            (content, source, embedding_json, embedding_model)
+            """INSERT INTO docs (content, source, embedding, embedding_model, metadata, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (content, source, embedding_json, embedding_model, metadata_json, expires_at)
         )
         doc_id = cursor.lastrowid
         self.db.commit()
@@ -145,17 +158,26 @@ class SQLiteBackend(BaseBackend):
     def get(self, doc_id: int) -> Document | None:
         """Retrieve a document by ID."""
         result = self.db.execute(
-            "SELECT id, content, source, created_at, embedding_model FROM docs WHERE id = ?",
+            """SELECT id, content, source, created_at, embedding_model, metadata, expires_at
+               FROM docs WHERE id = ?""",
             (doc_id,)
         ).fetchone()
 
         if result:
+            metadata = None
+            if result["metadata"]:
+                try:
+                    metadata = json.loads(result["metadata"])
+                except json.JSONDecodeError:
+                    pass
             return Document(
                 id=result["id"],
                 content=result["content"],
                 source=result["source"],
                 created_at=result["created_at"],
                 embedding_model=result["embedding_model"],
+                metadata=metadata,
+                expires_at=result["expires_at"],
             )
         return None
 
@@ -165,7 +187,9 @@ class SQLiteBackend(BaseBackend):
         content: str | None = None,
         source: str | None = None,
         embedding: list[float] | None = None,
-        embedding_model: str | None = None
+        embedding_model: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None
     ) -> bool:
         """Update an existing document."""
         # Build dynamic UPDATE query based on provided fields
@@ -184,6 +208,12 @@ class SQLiteBackend(BaseBackend):
         if embedding_model is not None:
             updates.append("embedding_model = ?")
             params.append(embedding_model)
+        if metadata is not None:
+            updates.append("metadata = ?")
+            params.append(json.dumps(metadata))
+        if expires_at is not None:
+            updates.append("expires_at = ?")
+            params.append(expires_at)
 
         if not updates:
             # Nothing to update, check if doc exists
@@ -302,6 +332,82 @@ class SQLiteBackend(BaseBackend):
             GROUP BY embedding_model
         """).fetchall()
         return [{"model": r["model"], "count": r["count"]} for r in results]
+
+    # -------------------------------------------------------------------------
+    # Document Listing and Filtering
+    # -------------------------------------------------------------------------
+
+    def list_documents(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[Document]:
+        """List documents with optional filtering."""
+        query = """SELECT id, content, source, created_at, embedding_model, metadata, expires_at
+                   FROM docs WHERE 1=1"""
+        params = []
+
+        if source is not None:
+            query += " AND source = ?"
+            params.append(source)
+
+        # For metadata filtering in SQLite, we use JSON functions
+        if metadata_filter:
+            for key, value in metadata_filter.items():
+                query += " AND json_extract(metadata, ?) = ?"
+                params.append(f"$.{key}")
+                params.append(json.dumps(value) if isinstance(value, (dict, list)) else value)
+
+        query += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        results = self.db.execute(query, params).fetchall()
+
+        documents = []
+        for r in results:
+            metadata = None
+            if r["metadata"]:
+                try:
+                    metadata = json.loads(r["metadata"])
+                except json.JSONDecodeError:
+                    pass
+            documents.append(Document(
+                id=r["id"],
+                content=r["content"],
+                source=r["source"],
+                created_at=r["created_at"],
+                embedding_model=r["embedding_model"],
+                metadata=metadata,
+                expires_at=r["expires_at"],
+            ))
+        return documents
+
+    # -------------------------------------------------------------------------
+    # Expiration Management
+    # -------------------------------------------------------------------------
+
+    def cleanup_expired(self) -> int:
+        """Delete all documents that have expired (expires_at < now)."""
+        cursor = self.db.execute(
+            "DELETE FROM docs WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
+        )
+        deleted = cursor.rowcount
+        self.db.commit()
+        return deleted
+
+    # -------------------------------------------------------------------------
+    # Deduplication
+    # -------------------------------------------------------------------------
+
+    def find_duplicate(self, content: str) -> int | None:
+        """Check if a document with the exact same content already exists."""
+        result = self.db.execute(
+            "SELECT id FROM docs WHERE content = ? LIMIT 1",
+            (content,)
+        ).fetchone()
+        return result["id"] if result else None
 
     # -------------------------------------------------------------------------
     # Transaction Support

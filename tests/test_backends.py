@@ -247,8 +247,17 @@ class TestBackendFactory:
             def get_embedding_stats(self):
                 return []
 
-            def update(self, doc_id, content=None, source=None, embedding=None, embedding_model=None):
+            def update(self, doc_id, content=None, source=None, embedding=None, embedding_model=None, metadata=None, expires_at=None):
                 return False
+
+            def list_documents(self, source=None, metadata_filter=None, limit=100, offset=0):
+                return []
+
+            def cleanup_expired(self):
+                return 0
+
+            def find_duplicate(self, content):
+                return None
 
             def commit(self):
                 pass

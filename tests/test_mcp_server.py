@@ -255,6 +255,113 @@ class TestMCPIngestFile:
         assert "error" in result
 
 
+class TestMCPMetadataTools:
+    """Test metadata-related MCP tools."""
+
+    def test_add_document_with_metadata(self, mcp_tools):
+        """Test add_document with metadata."""
+        result = mcp_tools.add_document(
+            "Test content with metadata",
+            "test",
+            metadata={"project": "demo", "priority": "high"}
+        )
+        assert result["status"] == "added"
+        assert result["metadata"] == {"project": "demo", "priority": "high"}
+
+    def test_add_document_with_expiration(self, mcp_tools):
+        """Test add_document with expiration."""
+        result = mcp_tools.add_document(
+            "Expiring content",
+            "test",
+            expires_at="2099-12-31T23:59:59"
+        )
+        assert result["status"] == "added"
+        assert result["expires_at"] == "2099-12-31T23:59:59"
+
+    def test_update_document_metadata(self, mcp_tools):
+        """Test update_document with metadata."""
+        # Add a document
+        add_result = mcp_tools.add_document("Original content", "test")
+        doc_id = add_result["id"]
+
+        # Update metadata
+        update_result = mcp_tools.update_document(
+            doc_id,
+            metadata={"status": "reviewed", "reviewer": "test"}
+        )
+        assert update_result["updated"] is True
+        assert update_result["document"]["metadata"] == {"status": "reviewed", "reviewer": "test"}
+
+    def test_list_documents_tool(self, mcp_tools):
+        """Test list_documents tool."""
+        # Add documents with metadata
+        mcp_tools.add_document("Doc A", "test", metadata={"type": "alpha"})
+        mcp_tools.add_document("Doc B", "test", metadata={"type": "beta"})
+
+        # List all
+        result = mcp_tools.list_documents()
+        assert "documents" in result
+        assert result["count"] >= 2
+
+    def test_list_documents_with_filter(self, mcp_tools):
+        """Test list_documents with metadata filter."""
+        # Add documents with different metadata
+        mcp_tools.add_document("Filtered doc 1", "filter_test", metadata={"category": "special"})
+        mcp_tools.add_document("Filtered doc 2", "filter_test", metadata={"category": "normal"})
+
+        # Filter by metadata
+        result = mcp_tools.list_documents(metadata_filter={"category": "special"})
+        assert result["count"] >= 1
+        for doc in result["documents"]:
+            if "metadata" in doc and doc["metadata"]:
+                if "category" in doc["metadata"]:
+                    assert doc["metadata"]["category"] == "special"
+
+    def test_cleanup_expired_tool(self, mcp_tools):
+        """Test cleanup_expired tool."""
+        # Add expired document
+        mcp_tools.add_document(
+            "Old expired content",
+            "expired_test",
+            expires_at="2020-01-01T00:00:00"
+        )
+
+        # Run cleanup
+        result = mcp_tools.cleanup_expired()
+        assert "deleted" in result
+        assert result["deleted"] >= 1
+
+    def test_find_duplicate_tool(self, mcp_tools):
+        """Test find_duplicate tool."""
+        # Add a document
+        add_result = mcp_tools.add_document("Unique text for dedup test", "test")
+        doc_id = add_result["id"]
+
+        # Find duplicate
+        result = mcp_tools.find_duplicate("Unique text for dedup test")
+        assert result["duplicate_found"] is True
+        assert result["doc_id"] == doc_id
+
+    def test_find_duplicate_not_found(self, mcp_tools):
+        """Test find_duplicate when no duplicate exists."""
+        result = mcp_tools.find_duplicate("This content does not exist in the KB")
+        assert result["duplicate_found"] is False
+        assert result["doc_id"] is None
+
+    def test_add_document_check_duplicate(self, mcp_tools):
+        """Test add_document with check_duplicate flag."""
+        # Add first document
+        result1 = mcp_tools.add_document("Duplicate test content", "test1", check_duplicate=True)
+        doc_id1 = result1["id"]
+
+        # Try to add same content with check_duplicate
+        result2 = mcp_tools.add_document("Duplicate test content", "test2", check_duplicate=True)
+        doc_id2 = result2["id"]
+
+        # Should return same ID
+        assert doc_id1 == doc_id2
+
+
 class TestMigration:
     """Test database migration scenarios."""
 

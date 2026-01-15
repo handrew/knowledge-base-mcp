@@ -70,38 +70,63 @@ def search(query: str, mode: str = "hybrid", limit: int = 5) -> list[dict]:
 
 
 @mcp.tool()
-def add_document(content: str, source: str = "manual") -> dict:
+def add_document(
+    content: str,
+    source: str = "manual",
+    metadata: dict = None,
+    expires_at: str = None,
+    check_duplicate: bool = False
+) -> dict:
     """
     Add a document to the knowledge base.
 
     Args:
         content: The text content to add (1-3 paragraphs recommended)
         source: Optional source identifier (e.g., filename, URL, topic)
+        metadata: Optional key-value metadata (e.g., {"project": "foo", "private": true})
+        expires_at: Optional expiration timestamp (ISO format, e.g., "2024-12-31T23:59:59")
+        check_duplicate: If True, return existing doc ID if content already exists
 
     Returns:
-        The created document with its ID
+        The created document with its ID, or existing ID if duplicate found
     """
-    doc_id = kb.add(content, source)
-    return {"id": doc_id, "content": content, "source": source, "status": "added"}
+    doc_id = kb.add(content, source, metadata, expires_at, check_duplicate)
+    result = {"id": doc_id, "content": content, "source": source, "status": "added"}
+    if metadata:
+        result["metadata"] = metadata
+    if expires_at:
+        result["expires_at"] = expires_at
+    return result
 
 
 @mcp.tool()
-def add_documents(documents: list[dict]) -> dict:
+def add_documents(documents: list[dict], check_duplicate: bool = False) -> dict:
     """
     Add multiple documents to the knowledge base.
 
     Args:
-        documents: List of dicts with 'content' and optional 'source' keys
+        documents: List of dicts with keys:
+            - content: str (required)
+            - source: str (optional)
+            - metadata: dict (optional)
+            - expires_at: str (optional, ISO format)
+        check_duplicate: If True, skip documents whose content already exists
 
     Returns:
         Summary of added documents
     """
-    ids = kb.add_batch(documents)
+    ids = kb.add_batch(documents, check_duplicate)
     return {"added": len(ids), "ids": ids}
 
 
 @mcp.tool()
-def update_document(doc_id: int, content: str = None, source: str = None) -> dict:
+def update_document(
+    doc_id: int,
+    content: str = None,
+    source: str = None,
+    metadata: dict = None,
+    expires_at: str = None
+) -> dict:
     """
     Update an existing document in the knowledge base.
 
@@ -112,11 +137,13 @@ def update_document(doc_id: int, content: str = None, source: str = None) -> dic
         doc_id: The document ID to update
         content: New content (optional)
         source: New source (optional)
+        metadata: New metadata dict (optional, replaces existing)
+        expires_at: New expiration timestamp (optional)
 
     Returns:
         Status of the update with the updated document
     """
-    success = kb.update(doc_id, content=content, source=source)
+    success = kb.update(doc_id, content=content, source=source, metadata=metadata, expires_at=expires_at)
     if success:
         doc = kb.get(doc_id)
         return {"id": doc_id, "updated": True, "document": doc}
@@ -278,6 +305,63 @@ def list_backends() -> dict:
         "backends": get_available_backends(),
         "current_backend": kb.backend_type,
     }
+
+
+@mcp.tool()
+def list_documents(
+    source: str = None,
+    metadata_filter: dict = None,
+    limit: int = 100,
+    offset: int = 0
+) -> dict:
+    """
+    List documents with optional filtering.
+
+    Args:
+        source: Filter by source (optional)
+        metadata_filter: Filter by metadata key-value pairs (optional).
+                         Only documents matching ALL key-value pairs are returned.
+                         Example: {"project": "foo", "private": true}
+        limit: Maximum number of documents to return (default: 100)
+        offset: Number of documents to skip for pagination (default: 0)
+
+    Returns:
+        List of documents matching the filters
+    """
+    docs = kb.list_documents(source=source, metadata_filter=metadata_filter, limit=limit, offset=offset)
+    return {"documents": docs, "count": len(docs), "offset": offset, "limit": limit}
+
+
+@mcp.tool()
+def cleanup_expired() -> dict:
+    """
+    Delete all documents that have expired (expires_at < now).
+
+    This is called automatically on server startup, but can also be
+    invoked manually to clean up expired documents.
+
+    Returns:
+        Number of documents deleted
+    """
+    deleted = kb.cleanup_expired()
+    return {"deleted": deleted}
+
+
+@mcp.tool()
+def find_duplicate(content: str) -> dict:
+    """
+    Check if a document with the exact same content already exists.
+
+    Useful for deduplication before adding new documents.
+
+    Args:
+        content: The content to check for
+
+    Returns:
+        The document ID if a duplicate exists, or null if no duplicate found
+    """
+    doc_id = kb.find_duplicate(content)
+    return {"duplicate_found": doc_id is not None, "doc_id": doc_id}
 
 
 if __name__ == "__main__":

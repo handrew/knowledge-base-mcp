@@ -34,6 +34,8 @@ class Document:
         created_at: Timestamp when the document was created
         embedding: Vector embedding as a list of floats (optional)
         embedding_model: Name of the model used to generate the embedding
+        metadata: Flexible key-value metadata (JSON-serializable dict)
+        expires_at: Optional expiration timestamp (ISO format)
     """
     id: int
     content: str
@@ -41,16 +43,23 @@ class Document:
     created_at: str | None = None
     embedding: list[float] | None = None
     embedding_model: str | None = None
+    metadata: dict[str, Any] | None = None
+    expires_at: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary representation."""
-        return {
+        result = {
             "id": self.id,
             "content": self.content,
             "source": self.source,
             "created_at": self.created_at,
             "embedding_model": self.embedding_model,
         }
+        if self.metadata is not None:
+            result["metadata"] = self.metadata
+        if self.expires_at is not None:
+            result["expires_at"] = self.expires_at
+        return result
 
 
 @dataclass
@@ -62,20 +71,25 @@ class SearchResult:
         content: Document content
         source: Document source
         score: Relevance score (higher is better)
+        metadata: Document metadata (optional)
     """
     id: int
     content: str
     source: str
     score: float
+    metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary representation."""
-        return {
+        result = {
             "id": self.id,
             "content": self.content,
             "source": self.source,
             "score": self.score,
         }
+        if self.metadata is not None:
+            result["metadata"] = self.metadata
+        return result
 
 
 class BaseBackend(ABC):
@@ -116,7 +130,9 @@ class BaseBackend(ABC):
         content: str,
         source: str,
         embedding: list[float] | None,
-        embedding_model: str | None
+        embedding_model: str | None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None
     ) -> int:
         """Add a document to the knowledge base.
 
@@ -125,6 +141,8 @@ class BaseBackend(ABC):
             source: Source identifier (e.g., filename, URL)
             embedding: Optional vector embedding
             embedding_model: Name of the model used for embedding
+            metadata: Optional key-value metadata (JSON-serializable dict)
+            expires_at: Optional expiration timestamp (ISO format)
 
         Returns:
             The ID of the newly created document
@@ -169,7 +187,9 @@ class BaseBackend(ABC):
         content: str | None = None,
         source: str | None = None,
         embedding: list[float] | None = None,
-        embedding_model: str | None = None
+        embedding_model: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None
     ) -> bool:
         """Update an existing document.
 
@@ -181,6 +201,8 @@ class BaseBackend(ABC):
             source: New source (optional)
             embedding: New embedding vector (optional)
             embedding_model: New embedding model name (optional)
+            metadata: New metadata dict (optional, replaces existing)
+            expires_at: New expiration timestamp (optional)
 
         Returns:
             True if the document was updated, False if not found
@@ -290,6 +312,61 @@ class BaseBackend(ABC):
 
         Returns:
             List of dicts with 'model' and 'count' keys
+        """
+        pass
+
+    # -------------------------------------------------------------------------
+    # Document Listing and Filtering
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    def list_documents(
+        self,
+        source: str | None = None,
+        metadata_filter: dict[str, Any] | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[Document]:
+        """List documents with optional filtering.
+
+        Args:
+            source: Filter by source (optional)
+            metadata_filter: Filter by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are returned.
+            limit: Maximum number of documents to return
+            offset: Number of documents to skip
+
+        Returns:
+            List of Document objects matching the filters
+        """
+        pass
+
+    # -------------------------------------------------------------------------
+    # Expiration Management
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    def cleanup_expired(self) -> int:
+        """Delete all documents that have expired (expires_at < now).
+
+        Returns:
+            Number of documents deleted
+        """
+        pass
+
+    # -------------------------------------------------------------------------
+    # Deduplication
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    def find_duplicate(self, content: str) -> int | None:
+        """Check if a document with the exact same content already exists.
+
+        Args:
+            content: The content to check for
+
+        Returns:
+            The document ID if a duplicate exists, None otherwise
         """
         pass
 

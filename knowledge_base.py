@@ -105,20 +105,53 @@ class KnowledgeBase:
         embedding = model.encode(text, normalize_embeddings=True)
         return embedding.tolist()
 
-    def add(self, content: str, source: str = "unknown") -> int:
-        """Add a document to the knowledge base."""
-        embedding = self._embed(content, is_query=False)
-        return self.backend.add(content, source, embedding, self.model_name)
+    def add(
+        self,
+        content: str,
+        source: str = "unknown",
+        metadata: dict | None = None,
+        expires_at: str | None = None,
+        check_duplicate: bool = False
+    ) -> int | None:
+        """Add a document to the knowledge base.
 
-    def add_batch(self, documents: list[dict]) -> list[int]:
-        """Add multiple documents. Each dict should have 'content' and optionally 'source'."""
+        Args:
+            content: The text content to add
+            source: Source identifier (e.g., filename, URL)
+            metadata: Optional key-value metadata (JSON-serializable dict)
+            expires_at: Optional expiration timestamp (ISO format, e.g., "2024-12-31T23:59:59")
+            check_duplicate: If True, check for exact content duplicate and return existing ID
+
+        Returns:
+            The document ID (new or existing if duplicate found), or None if duplicate and check_duplicate=True
+        """
+        if check_duplicate:
+            existing_id = self.backend.find_duplicate(content)
+            if existing_id is not None:
+                return existing_id
+
+        embedding = self._embed(content, is_query=False)
+        return self.backend.add(content, source, embedding, self.model_name, metadata, expires_at)
+
+    def add_batch(self, documents: list[dict], check_duplicate: bool = False) -> list[int]:
+        """Add multiple documents.
+
+        Each dict should have:
+            - content: str (required)
+            - source: str (optional, defaults to "unknown")
+            - metadata: dict (optional)
+            - expires_at: str (optional, ISO format timestamp)
+        """
         ids = []
         for doc in documents:
             content = doc.get("content", "")
             source = doc.get("source", "unknown")
+            metadata = doc.get("metadata")
+            expires_at = doc.get("expires_at")
             if content:
-                doc_id = self.add(content, source)
-                ids.append(doc_id)
+                doc_id = self.add(content, source, metadata, expires_at, check_duplicate)
+                if doc_id is not None:
+                    ids.append(doc_id)
         return ids
 
     def search_keyword(self, query: str, limit: int = 5) -> list[dict]:
@@ -192,7 +225,14 @@ class KnowledgeBase:
             for id, data in ranked[:limit]
         ]
 
-    def update(self, doc_id: int, content: str | None = None, source: str | None = None) -> bool:
+    def update(
+        self,
+        doc_id: int,
+        content: str | None = None,
+        source: str | None = None,
+        metadata: dict | None = None,
+        expires_at: str | None = None
+    ) -> bool:
         """Update an existing document.
 
         If content is updated, the embedding is automatically regenerated.
@@ -201,6 +241,8 @@ class KnowledgeBase:
             doc_id: The document ID to update
             content: New content (optional)
             source: New source (optional)
+            metadata: New metadata dict (optional, replaces existing)
+            expires_at: New expiration timestamp (optional)
 
         Returns:
             True if the document was updated, False if not found
@@ -217,7 +259,9 @@ class KnowledgeBase:
             content=content,
             source=source,
             embedding=embedding,
-            embedding_model=embedding_model
+            embedding_model=embedding_model,
+            metadata=metadata,
+            expires_at=expires_at
         )
 
     def append(self, doc_id: int, content: str, separator: str = "\n\n") -> bool:
@@ -258,6 +302,47 @@ class KnowledgeBase:
     def list_sources(self) -> list[dict]:
         """List all sources with document counts."""
         return self.backend.list_sources()
+
+    def list_documents(
+        self,
+        source: str | None = None,
+        metadata_filter: dict | None = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> list[dict]:
+        """List documents with optional filtering.
+
+        Args:
+            source: Filter by source (optional)
+            metadata_filter: Filter by metadata key-value pairs (optional).
+                             Only documents matching ALL key-value pairs are returned.
+            limit: Maximum number of documents to return
+            offset: Number of documents to skip (for pagination)
+
+        Returns:
+            List of documents matching the filters
+        """
+        docs = self.backend.list_documents(source, metadata_filter, limit, offset)
+        return [doc.to_dict() for doc in docs]
+
+    def cleanup_expired(self) -> int:
+        """Delete all documents that have expired (expires_at < now).
+
+        Returns:
+            Number of documents deleted
+        """
+        return self.backend.cleanup_expired()
+
+    def find_duplicate(self, content: str) -> int | None:
+        """Check if a document with the exact same content already exists.
+
+        Args:
+            content: The content to check for
+
+        Returns:
+            The document ID if a duplicate exists, None otherwise
+        """
+        return self.backend.find_duplicate(content)
 
     def get_embedding_stats(self) -> dict:
         """Get statistics about embeddings."""
